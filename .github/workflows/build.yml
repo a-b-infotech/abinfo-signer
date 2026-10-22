@@ -7,6 +7,8 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
+permissions: write-all
+
 jobs:
   build:
     name: Build on ${{ matrix.os }}
@@ -123,3 +125,43 @@ jobs:
           name: Abinfo_Signer_macOS
           path: dist/Abinfo_Signer_macOS.zip
           if-no-files-found: error
+
+  # -------------------------------------------------------------
+  # 6. DIRECT DOWNLOAD RELEASE PUBLISHER
+  # -------------------------------------------------------------
+  release:
+    name: Publish Public Direct Download Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Organize Release Files
+        run: |
+          mkdir -p release_assets
+          cp artifacts/Abinfo_Signer_Windows_x64/Abinfo_Signer_Offline.exe release_assets/Abinfo_Signer_Windows.exe
+          cp artifacts/Abinfo_Signer_Linux_x64/Abinfo_Signer_Linux_x64.tar.gz release_assets/Abinfo_Signer_Linux.tar.gz
+          cp artifacts/Abinfo_Signer_macOS/Abinfo_Signer_macOS.zip release_assets/Abinfo_Signer_macOS.zip
+          ls -la release_assets
+
+      - name: Publish or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.1
+          name: "ABInfo Digital Signer v1.1 (Multi-OS)"
+          draft: false
+          prerelease: false
+          make_latest: true
+          body: |
+            ## ABInfo Digital PDF Signer v1.1
+            Direct download links for official website integration:
+            - **Windows**: [Abinfo_Signer_Windows.exe](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Windows.exe)
+            - **macOS**: [Abinfo_Signer_macOS.zip](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_macOS.zip)
+            - **Linux**: [Abinfo_Signer_Linux.tar.gz](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Linux.tar.gz)
+          files: release_assets/*
+
