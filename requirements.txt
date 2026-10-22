@@ -1,0 +1,13 @@
+PyMuPDF>=1.23.0
+Pillow>=10.0.0
+pystray>=0.19.5
+Flask>=3.0.0
+flask-cors>=4.0.0
+werkzeug>=3.0.0
+PyPDF2>=3.0.0
+python-pkcs11>=0.7.0
+cryptography>=41.0.0
+pyhanko[pkcs11]>=0.20.0
+reportlab>=4.0.0
+requests>=2.31.0
+pyinstaller>=6.3.0

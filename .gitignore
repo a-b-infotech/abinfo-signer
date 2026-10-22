@@ -1,0 +1,24 @@
+# PyInstaller build outputs
+build/
+dist/
+*.spec
+
+# Python cache & logs
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+.system_generated/
+
+# Sensitive PFX / P12 certificate files (never commit private keys to GitHub)
+*.p12
+*.pfx
+cert_base64.txt
+
+# Large zip files
+*.zip
+*.tar.gz
+
+# Local OS metadata
+Thumbs.db
+.DS_Store

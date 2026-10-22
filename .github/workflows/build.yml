@@ -1,0 +1,124 @@
+name: Multi-OS Build & Sign Digital Signer
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python-version: ["3.11"]
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      # -------------------------------------------------------------
+      # 1. OS-SPECIFIC SYSTEM DEPENDENCIES
+      # -------------------------------------------------------------
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk pcscd libpcsclite-dev libpcsclite1 opensc zip
+
+      - name: Install System Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install opensc
+
+      # -------------------------------------------------------------
+      # 2. PYTHON DEPENDENCIES
+      # -------------------------------------------------------------
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # -------------------------------------------------------------
+      # 3. BUILD FOR WINDOWS
+      # -------------------------------------------------------------
+      - name: Build Executable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --onefile --noconsole --icon=app_icon.ico --add-data "app_icon.ico;." --add-data "app_icon.png;." --name "Abinfo_Signer_Offline" server2.py
+
+      - name: Decode & Code-Sign Executable (Windows Only)
+        if: runner.os == 'Windows' && env.CERT_BASE64 != ''
+        shell: powershell
+        env:
+          CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          try {
+            $certPath = "C:\runner_cert.pfx"
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:CERT_BASE64))
+            
+            $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" -Filter "signtool.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+            if ($signtool) {
+              Write-Host "Found signtool at: $signtool"
+              & $signtool sign /f $certPath /p $env:CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 "dist\Abinfo_Signer_Offline.exe"
+              Write-Host "Binary signed successfully!"
+            } else {
+              Write-Warning "signtool.exe not found on runner."
+            }
+          } finally {
+            if (Test-Path $certPath) { Remove-Item -Force $certPath }
+          }
+
+      - name: Upload Windows Artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Abinfo_Signer_Windows_x64
+          path: dist/Abinfo_Signer_Offline.exe
+          if-no-files-found: error
+
+      # -------------------------------------------------------------
+      # 4. BUILD FOR LINUX
+      # -------------------------------------------------------------
+      - name: Build Standalone Binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --onefile --noconsole --icon=app_icon.png --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
+          chmod +x dist/Abinfo_Signer_Offline
+          cd dist && tar -czvf Abinfo_Signer_Linux_x64.tar.gz Abinfo_Signer_Offline
+
+      - name: Upload Linux Artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Abinfo_Signer_Linux_x64
+          path: dist/Abinfo_Signer_Linux_x64.tar.gz
+          if-no-files-found: error
+
+      # -------------------------------------------------------------
+      # 5. BUILD FOR MACOS
+      # -------------------------------------------------------------
+      - name: Build Application Bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --onefile --windowed --icon=app_icon.png --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
+          cd dist && zip -r Abinfo_Signer_macOS.zip Abinfo_Signer_Offline.app
+
+      - name: Upload macOS Artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Abinfo_Signer_macOS
+          path: dist/Abinfo_Signer_macOS.zip
+          if-no-files-found: error
