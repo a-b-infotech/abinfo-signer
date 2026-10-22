@@ -59,6 +59,7 @@ jobs:
 
       - name: Decode & Code-Sign Executable (Windows Only)
         if: runner.os == 'Windows' && env.CERT_BASE64 != ''
+        continue-on-error: true
         shell: powershell
         env:
           CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
