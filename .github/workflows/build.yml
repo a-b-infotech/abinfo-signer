@@ -57,7 +57,7 @@ jobs:
       - name: Build Executable (Windows)
         if: runner.os == 'Windows'
         run: |
-          pyinstaller --onefile --noconsole --icon=app_icon.ico --add-data "app_icon.ico;." --add-data "app_icon.png;." --name "Abinfo_Signer_Offline" server2.py
+          pyinstaller --onefile --noconsole --icon=app_icon.ico --collect-all pymupdf --add-data "app_icon.ico;." --add-data "app_icon.png;." --name "Abinfo_Signer_Offline" server2.py
 
       - name: Decode & Code-Sign Executable (Windows Only)
         if: runner.os == 'Windows' && env.CERT_BASE64 != ''
@@ -97,7 +97,7 @@ jobs:
       - name: Build Standalone Binary (Linux)
         if: runner.os == 'Linux'
         run: |
-          pyinstaller --onefile --noconsole --icon=app_icon.png --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
+          pyinstaller --onefile --noconsole --icon=app_icon.png --collect-all pymupdf --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
           chmod +x dist/Abinfo_Signer_Offline
           cd dist && tar -czvf Abinfo_Signer_Linux_x64.tar.gz Abinfo_Signer_Offline
 
@@ -115,7 +115,7 @@ jobs:
       - name: Build Application Bundle (macOS)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --onefile --windowed --icon=app_icon.png --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
+          pyinstaller --onefile --windowed --icon=app_icon.png --collect-all pymupdf --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
           cd dist && zip -r Abinfo_Signer_macOS.zip Abinfo_Signer_Offline.app
 
       - name: Upload macOS Artifact

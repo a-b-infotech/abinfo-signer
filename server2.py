@@ -43,6 +43,13 @@ if CURRENT_OS == 'Windows':
 # GUI & Visual Components
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import types
+if 'pymupdf.layout' not in sys.modules:
+    try:
+        sys.modules['pymupdf.layout'] = types.ModuleType('pymupdf.layout')
+    except Exception:
+        pass
+
 try:
     import fitz  # PyMuPDF
     from PIL import Image, ImageTk
