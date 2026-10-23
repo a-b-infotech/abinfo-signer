@@ -15,9 +15,13 @@ __pycache__/
 *.pfx
 cert_base64.txt
 
-# Large zip files
+# Large zip & executable files
 *.zip
 *.tar.gz
+*.exe
+downloads/
+WhatsApp_Browser_Data/
+test_stamp_*.png
 
 # Local OS metadata
 Thumbs.db

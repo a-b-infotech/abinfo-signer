@@ -83,12 +83,37 @@ jobs:
             if (Test-Path $certPath) { Remove-Item -Force $certPath }
           }
 
-      - name: Upload Windows Artifact
+      - name: Build Windows Setup Installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $iscc) {
+            $iscc = (Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "ISCC.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
+          }
+          if (-not $iscc) {
+            Write-Host "Installing Inno Setup via choco..."
+            choco install innosetup -y
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "Compiling installer with ISCC: $iscc"
+          New-Item -ItemType Directory -Force -Path "downloads"
+          & $iscc /O"downloads" /F"Abinfo_Signer_Windows_Setup" installer.iss
+
+      - name: Upload Windows Standalone Artifact
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: Abinfo_Signer_Windows_x64
           path: dist/Abinfo_Signer_Offline.exe
+          if-no-files-found: error
+
+      - name: Upload Windows Setup Installer Artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Abinfo_Signer_Windows_Setup
+          path: downloads/Abinfo_Signer_Windows_Setup.exe
           if-no-files-found: error
 
       # -------------------------------------------------------------
@@ -99,7 +124,10 @@ jobs:
         run: |
           pyinstaller --onefile --noconsole --icon=app_icon.png --collect-all fitz --collect-all pymupdf --exclude-module pymupdf4llm --exclude-module onnx --exclude-module onnxruntime --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
           chmod +x dist/Abinfo_Signer_Offline
-          cd dist && tar -czvf Abinfo_Signer_Linux_x64.tar.gz Abinfo_Signer_Offline
+          cp install_linux.sh dist/install.sh && chmod +x dist/install.sh
+          cp ab_infotech_ca_cert.cer dist/
+          cp app_icon.png dist/icon.png
+          cd dist && tar -czvf Abinfo_Signer_Linux_x64.tar.gz Abinfo_Signer_Offline install.sh ab_infotech_ca_cert.cer icon.png
 
       - name: Upload Linux Artifact
         if: runner.os == 'Linux'
@@ -116,7 +144,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           pyinstaller --onefile --windowed --icon=app_icon.png --collect-all fitz --collect-all pymupdf --exclude-module pymupdf4llm --exclude-module onnx --exclude-module onnxruntime --add-data "app_icon.png:." --name "Abinfo_Signer_Offline" server2.py
-          cd dist && zip -r Abinfo_Signer_macOS.zip Abinfo_Signer_Offline.app
+          cp install_mac.sh dist/install.sh && chmod +x dist/install.sh
+          cp ab_infotech_ca_cert.cer dist/
+          cd dist && zip -r Abinfo_Signer_macOS.zip Abinfo_Signer_Offline.app install.sh ab_infotech_ca_cert.cer
 
       - name: Upload macOS Artifact
         if: runner.os == 'macOS'
@@ -144,6 +174,7 @@ jobs:
       - name: Organize Release Files
         run: |
           mkdir -p release_assets
+          cp artifacts/Abinfo_Signer_Windows_Setup/Abinfo_Signer_Windows_Setup.exe release_assets/Abinfo_Signer_Windows_Setup.exe || true
           cp artifacts/Abinfo_Signer_Windows_x64/Abinfo_Signer_Offline.exe release_assets/Abinfo_Signer_Windows.exe
           cp artifacts/Abinfo_Signer_Linux_x64/Abinfo_Signer_Linux_x64.tar.gz release_assets/Abinfo_Signer_Linux.tar.gz
           cp artifacts/Abinfo_Signer_macOS/Abinfo_Signer_macOS.zip release_assets/Abinfo_Signer_macOS.zip
@@ -160,8 +191,9 @@ jobs:
           body: |
             ## ABInfo Digital PDF Signer v1.1
             Direct download links for official website integration:
-            - **Windows**: [Abinfo_Signer_Windows.exe](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Windows.exe)
-            - **macOS**: [Abinfo_Signer_macOS.zip](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_macOS.zip)
-            - **Linux**: [Abinfo_Signer_Linux.tar.gz](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Linux.tar.gz)
+            - **Windows Setup Installer**: [Abinfo_Signer_Windows_Setup.exe](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Windows_Setup.exe)
+            - **Windows Standalone Portable**: [Abinfo_Signer_Windows.exe](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Windows.exe)
+            - **macOS Bundle**: [Abinfo_Signer_macOS.zip](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_macOS.zip)
+            - **Linux Package**: [Abinfo_Signer_Linux.tar.gz](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Linux.tar.gz)
           files: release_assets/*
 

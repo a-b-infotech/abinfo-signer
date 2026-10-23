@@ -290,8 +290,36 @@ def find_epass_driver_path():
         pass
     return r"C:\Windows\System32\eps2003csp11v2.dll"
 
+CUSTOM_DRIVERS_FILE = os.path.join(APP_DIR, "custom_drivers.json")
+
+def load_custom_drivers():
+    """Loads user-defined custom PKCS#11 drivers from custom_drivers.json."""
+    if os.path.exists(CUSTOM_DRIVERS_FILE):
+        try:
+            with open(CUSTOM_DRIVERS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                elif isinstance(data, list):
+                    res = {}
+                    for item in data:
+                        if isinstance(item, dict) and item.get('name') and item.get('path'):
+                            res[item['name']] = item['path']
+                    return res
+        except Exception as e:
+            logger.warning(f"Could not load custom drivers: {e}")
+    return {}
+
+def save_custom_drivers(drivers_dict):
+    """Saves user-defined custom PKCS#11 drivers to custom_drivers.json."""
+    try:
+        with open(CUSTOM_DRIVERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(drivers_dict, f, indent=2)
+    except Exception as e:
+        logger.error(f"Could not save custom drivers: {e}")
+
 def get_platform_drivers():
-    """Returns detected PKCS#11 drivers based on current Operating System."""
+    """Returns detected PKCS#11 drivers based on current Operating System and user additions."""
     drivers = {}
     if CURRENT_OS == 'Windows':
         is_64bit = sys.maxsize > 2**32
@@ -320,7 +348,12 @@ def get_platform_drivers():
         drivers["mToken / CryptoID (Linux)"] = "/usr/lib/libcryptoid_pkcs11.so"
         drivers["OpenSC (Linux)"] = "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
 
-    drivers["[Browse Custom Driver Library...]"] = "__CUSTOM__"
+    # Merge user's saved custom drivers
+    custom = load_custom_drivers()
+    for name, path in custom.items():
+        drivers[f"⭐ {name}"] = path
+
+    drivers["➕ [Add Custom Token Driver...]"] = "__CUSTOM__"
     return drivers
 
 DRIVER_MAP = get_platform_drivers()
@@ -674,110 +707,82 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                 ah = float(area['height'])
 
                 # 3D Drop Shadow
-                c.setFillColor(HexColor('#0F172A'), alpha=0.10)
-                c.roundRect(ax + 2, ay - 2, aw, ah, 5, stroke=0, fill=1)
-
-                # Signature Box Background & Border
-                c.setFillColor(HexColor('#F8FAFC'), alpha=0.96)
-                c.setStrokeColor(HexColor('#0F766E'))
-                c.setLineWidth(1.2)
-                c.roundRect(ax, ay, aw, ah, 5, stroke=1, fill=1)
-
-                # Accent Header Stripe
-                stripe_h = max(min(ah * 0.20, 20.0), 13.0)
-                c.setFillColor(HexColor('#0F766E'))
-                c.roundRect(ax + 0.6, ay + ah - stripe_h, aw - 1.2, stripe_h, 3, stroke=0, fill=1)
-
-                # 1. Background Checkmark Watermark (Right Tick in background)
                 c.saveState()
-                c.setStrokeColor(HexColor('#0F766E'), alpha=0.14)
-                c.setLineWidth(max(ah * 0.08, 3.5))
-                c.setLineCap(1)
-                c.setLineJoin(1)
+                c.setFillColor(HexColor('#0F172A'), alpha=0.10)
+                c.roundRect(ax + 2, ay - 2, aw, ah, 6, stroke=0, fill=1)
+                c.restoreState()
+
+                # Signature Box Background & Border (Clean subtle cyan-white tint)
+                c.saveState()
+                c.setFillColor(HexColor('#EBF6F9'), alpha=0.96)
+                c.setStrokeColor(HexColor('#0E7490'))
+                c.setLineWidth(1.2)
+                c.roundRect(ax, ay, aw, ah, 6, stroke=1, fill=1)
+                c.restoreState()
+
+                # Prominent Green Right Tick Mark (✔) Watermark on right side
+                c.saveState()
+                c.setStrokeColor(HexColor('#10B981'), alpha=0.45)
+                c.setLineWidth(max(ah * 0.10, 4.0))
+                c.setLineCap(1)  # Round cap
+                c.setLineJoin(1) # Round join
+
                 bx = ax + aw * 0.78
-                by = ay + ah * 0.40
-                bsize = min(ah * 0.65, aw * 0.40)
+                by = ay + ah * 0.45
+                bsize = min(ah * 0.65, aw * 0.38)
+
                 p_bg = c.beginPath()
-                p_bg.moveTo(bx - bsize * 0.42, by)
-                p_bg.lineTo(bx - bsize * 0.10, by - bsize * 0.32)
-                p_bg.lineTo(bx + bsize * 0.42, by + bsize * 0.42)
+                p_bg.moveTo(bx - bsize * 0.44, by - bsize * 0.05)
+                p_bg.lineTo(bx - bsize * 0.12, by - bsize * 0.38)
+                p_bg.lineTo(bx + bsize * 0.44, by + bsize * 0.42)
                 c.drawPath(p_bg, stroke=1, fill=0)
                 c.restoreState()
 
-                # Watermark Icon/Text
-                c.setFillColor(HexColor('#0F766E'), alpha=0.07)
-                c.setFont('Helvetica-Bold', max(min(ah * 0.38, 20.0), 7.0))
-                c.drawRightString(ax + aw - 8, ay + 6, "DIGITALLY SIGNED")
-
-                # Text Content Lines
+                # Text Content Lines formatted exactly as requested
                 lines = [
                     ('HEADER', "Digitally signed by:"),
-                    ('NAME', cn_name),
-                    ('ORG', f"Organization: {org_name}"),
-                    ('UNIT', f"Unit: {unit_name}"),
-                    ('DATE', f"Date: {now_ist}"),
-                    ('LOC', f"Location: {state}, {country}")
+                    ('NAME', f"Name:- {cn_name}"),
                 ]
+                if org_name and org_name != "N/A":
+                    lines.append(('TEXT', f"Organization:- {org_name}"))
+                if unit_name and unit_name != "N/A":
+                    lines.append(('TEXT', f"Unit:- {unit_name}"))
+                if country and country != "N/A":
+                    lines.append(('TEXT', f"Country:- {country}"))
+                if state and state != "N/A":
+                    lines.append(('TEXT', f"State:- {state}"))
+                lines.append(('DATE', f"Date:- {now_ist}"))
 
-                pad_x = max(aw * 0.04, 6.0)
-                pad_top = stripe_h + 3.0
-                pad_bot = 4.0
+                pad_x = max(aw * 0.05, 8.0)
+                pad_top = 8.0
+                pad_bot = 6.0
                 avail_h = max(ah - pad_top - pad_bot, 10.0)
-                avail_w = max(aw - (pad_x * 2.0), 20.0)
 
                 n_lines = len(lines)
                 line_step = avail_h / float(n_lines)
 
-                fs_h = line_step * 0.78
+                fs_h = line_step * 0.76
                 max_str_len = max(len(t) for _, t in lines)
-                fs_w = avail_w / (max_str_len * 0.54)
-                fs = min(fs_h, fs_w, 11.0)
-                fs = max(fs, 3.8)
+                fs_w = (aw - pad_x * 2) / (max_str_len * 0.54)
+                fs = min(fs_h, fs_w, 10.5)
+                fs = max(fs, 4.0)
 
-                line_step = max(fs * 1.16, avail_h / float(n_lines))
-                total_text_h = (n_lines - 1) * line_step + fs
-                start_y = ay + ah - pad_top - fs - max(0.0, (avail_h - total_text_h) / 2.0)
+                line_step = max(fs * 1.22, avail_h / float(n_lines))
+                start_y = ay + ah - pad_top - fs
 
                 cur_y = start_y
                 for ltype, text in lines:
                     if ltype == 'HEADER':
-                        # 2. Checkmark Badge in Header (Right Tick in sign)
-                        badge_r = min(stripe_h * 0.34, 5.5)
-                        badge_cx = ax + pad_x + badge_r
-                        header_cy = ay + ah - (stripe_h / 2.0)
-
-                        # Green Circle Badge
-                        c.setFillColor(HexColor('#10B981'))
-                        c.circle(badge_cx, header_cy, badge_r, stroke=0, fill=1)
-
-                        # White Checkmark inside Badge
-                        c.saveState()
-                        c.setStrokeColor(HexColor('#FFFFFF'))
-                        c.setLineWidth(max(badge_r * 0.28, 1.2))
-                        c.setLineCap(1)
-                        c.setLineJoin(1)
-                        p_badge = c.beginPath()
-                        p_badge.moveTo(badge_cx - badge_r * 0.48, header_cy - badge_r * 0.05)
-                        p_badge.lineTo(badge_cx - badge_r * 0.12, header_cy - badge_r * 0.40)
-                        p_badge.lineTo(badge_cx + badge_r * 0.50, header_cy + badge_r * 0.40)
-                        c.drawPath(p_badge, stroke=1, fill=0)
-                        c.restoreState()
-
-                        # Header text following the tick badge
-                        header_tx = badge_cx + badge_r + 5.0
-                        header_fs = min(fs * 1.05, 11.0)
-                        c.setFont('Helvetica-Bold', header_fs)
-                        c.setFillColor(HexColor('#FFFFFF'))
-                        c.drawString(header_tx, header_cy - (header_fs / 2.8), text)
-                        continue
+                        c.setFont('Helvetica-Bold', min(fs * 1.05, 11.0))
+                        c.setFillColor(HexColor('#0E7490'))
                     elif ltype == 'NAME':
                         c.setFont('Helvetica-Bold', fs)
                         c.setFillColor(HexColor('#0F172A'))
                     elif ltype == 'DATE':
-                        c.setFont('Helvetica-Bold', max(fs * 0.95, 3.8))
+                        c.setFont('Helvetica-Bold', max(fs * 0.96, 4.0))
                         c.setFillColor(HexColor('#1E3A8A'))
                     else:
-                        c.setFont('Helvetica', max(fs * 0.95, 3.8))
+                        c.setFont('Helvetica', max(fs * 0.96, 4.0))
                         c.setFillColor(HexColor('#334155'))
 
                     c.drawString(ax + pad_x, cur_y, text)
@@ -1239,6 +1244,14 @@ class VisualPdfSignerApp:
         if DRIVER_MAP: self.driver_combo.current(0)
         ttk.Button(driver_row, text="Load Token", style="Tool3D.TButton", command=self.load_certificates).pack(side=tk.RIGHT)
 
+        # Quick Add Custom Driver / Settings link
+        help_row = tk.Frame(card1, bg="#FFFFFF")
+        help_row.pack(fill=tk.X, pady=(2, 0))
+        ttk.Button(
+            help_row, text="⚙️ Token not listed? Manage Drivers & License...",
+            style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")
+        ).pack(side=tk.LEFT)
+
         card2 = self._create_3d_card(self.token_panel, shadow_color="#93C5FD", pady=(0, 4))
         tk.Label(card2, text="2. Select Token Certificate:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         self.cert_combo = ttk.Combobox(card2, state="readonly", font=get_sys_font(8))
@@ -1326,7 +1339,10 @@ class VisualPdfSignerApp:
         self.btn_next.pack(side=tk.LEFT, padx=3)
 
         self.btn_batch_tool = ttk.Button(toolbar, text="📁 Batch Sign Folder", style="Batch.TButton", command=self.open_batch_dialog)
-        self.btn_batch_tool.pack(side=tk.LEFT, padx=8)
+        self.btn_batch_tool.pack(side=tk.LEFT, padx=6)
+
+        self.btn_settings = ttk.Button(toolbar, text="⚙️ Settings & License", style="Tool3D.TButton", command=self.open_settings_dialog)
+        self.btn_settings.pack(side=tk.LEFT, padx=4)
 
         ttk.Button(toolbar, text="🧹 Clear Boxes", style="Tool3D.TButton", command=self.clear_boxes).pack(side=tk.RIGHT, padx=3)
         self.btn_draw = ttk.Button(toolbar, text="✏️ Draw Signature Box", style="Draw3D.TButton", command=self.toggle_draw_mode, state=tk.DISABLED)
@@ -1362,22 +1378,8 @@ class VisualPdfSignerApp:
 
     def _on_driver_selected(self, event=None):
         selected = self.driver_var.get()
-        if selected == "[Browse Custom Driver Library...]":
-            if CURRENT_OS == 'Windows':
-                ftypes = [("PKCS#11 Library (*.dll)", "*.dll"), ("All Files", "*.*")]
-            elif CURRENT_OS == 'Darwin':
-                ftypes = [("PKCS#11 Dynamic Library (*.dylib, *.so)", "*.dylib;*.so"), ("All Files", "*.*")]
-            else:
-                ftypes = [("PKCS#11 Shared Object (*.so)", "*.so*"), ("All Files", "*.*")]
-
-            custom_path = filedialog.askopenfilename(title=f"Select Token Driver Library ({CURRENT_OS})", filetypes=ftypes)
-            if custom_path:
-                label_name = f"Custom: {os.path.basename(custom_path)}"
-                DRIVER_MAP[label_name] = custom_path
-                all_keys = list(DRIVER_MAP.keys())
-                self.driver_combo['values'] = all_keys
-                self.driver_var.set(label_name)
-                self.lbl_status.config(text=f"Selected custom driver: {os.path.basename(custom_path)}", foreground="green")
+        if selected in ["__CUSTOM__", "➕ [Add Custom Token Driver...]", "[Browse Custom Driver Library...]"]:
+            self.open_settings_dialog(initial_tab="drivers")
 
     def browse_pfx_file(self):
         ftypes = [("PKCS#12 Certificates (*.p12;*.pfx)", "*.p12;*.pfx;*.P12;*.PFX"), ("All Files", "*.*")]
@@ -1415,9 +1417,8 @@ class VisualPdfSignerApp:
     def load_certificates(self):
         driver = DRIVER_MAP.get(self.driver_var.get())
         if not driver or driver == "__CUSTOM__":
-            self._on_driver_selected()
-            driver = DRIVER_MAP.get(self.driver_var.get())
-            if not driver or driver == "__CUSTOM__": return
+            self.open_settings_dialog(initial_tab="drivers")
+            return
 
         if not os.path.exists(driver):
             if "ePass" in self.driver_var.get():
@@ -1774,6 +1775,19 @@ class VisualPdfSignerApp:
             logger.warning(f"Local validation error: {val_e}")
             return "❓", f"Validation Note: {str(val_e)}"
 
+    def reload_drivers(self, select_driver=None):
+        global DRIVER_MAP
+        DRIVER_MAP = get_platform_drivers()
+        all_keys = list(DRIVER_MAP.keys())
+        self.driver_combo['values'] = all_keys
+        if select_driver and select_driver in all_keys:
+            self.driver_var.set(select_driver)
+        elif all_keys:
+            self.driver_combo.current(0)
+
+    def open_settings_dialog(self, initial_tab=None):
+        SettingsDialog(self.root, self, initial_tab=initial_tab)
+
     def open_batch_dialog(self):
         BatchSignDialog(self.root, self)
 
@@ -1946,6 +1960,265 @@ class BatchSignDialog:
             self.dialog.after(0, lambda err=str(batch_err): messagebox.showerror("Batch Error", err, parent=self.dialog))
         finally:
             self.dialog.after(0, lambda: self.btn_start.config(state=tk.NORMAL))
+
+# ==========================================
+# 4.6. SETTINGS & CUSTOM DRIVERS DIALOG
+# ==========================================
+class SettingsDialog:
+    def __init__(self, parent, main_app, initial_tab=None):
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(f"⚙️ Settings - License & Hardware Token Drivers [{CURRENT_OS}]")
+        self.dialog.geometry("700x560")
+        self.dialog.minsize(620, 500)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        self.main_app = main_app
+
+        if hasattr(self.main_app, '_apply_window_icon'):
+            self.main_app._apply_window_icon(self.dialog)
+
+        self.custom_drivers = load_custom_drivers()
+        self.driver_name_var = tk.StringVar()
+        self.driver_path_var = tk.StringVar()
+
+        self._build_ui()
+        if initial_tab == "drivers":
+            self.notebook.select(self.tab_drivers)
+
+    def _build_ui(self):
+        root_f = ttk.Frame(self.dialog, padding="12")
+        root_f.pack(fill=tk.BOTH, expand=True)
+
+        header_lbl = ttk.Label(
+            root_f, text="A B INFOTECH - System Settings & Token Manager",
+            font=get_sys_font(12, "bold"), foreground="#1E40AF"
+        )
+        header_lbl.pack(anchor=tk.W, pady=(0, 8))
+
+        self.notebook = ttk.Notebook(root_f)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # Tab 1: License & Validity
+        self.tab_license = ttk.Frame(self.notebook, padding="12")
+        self.notebook.add(self.tab_license, text="🛡️ License & Validity")
+        self._build_license_tab(self.tab_license)
+
+        # Tab 2: Custom Token Drivers
+        self.tab_drivers = ttk.Frame(self.notebook, padding="12")
+        self.notebook.add(self.tab_drivers, text="🔌 Token Drivers (.dll / .dylib / .so)")
+        self._build_drivers_tab(self.tab_drivers)
+
+        # Bottom Close Button
+        btn_row = ttk.Frame(root_f)
+        btn_row.pack(fill=tk.X, side=tk.BOTTOM)
+        ttk.Button(btn_row, text="Close Settings", style="Tool3D.TButton", command=self.dialog.destroy).pack(side=tk.RIGHT)
+
+    def _build_license_tab(self, parent):
+        import uuid
+        mac_node = uuid.getnode()
+        formatted_mac = ":".join(f"{(mac_node >> (i * 8)) & 0xff:02X}" for i in reversed(range(6)))
+
+        key, expiredate = LicenseManager.get_license_data()
+        status = LicenseManager.check_expiration_local()
+
+        # License Info Card
+        card = tk.Frame(parent, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        card.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(card, text="Hardware & License Status", font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        info_grid = tk.Frame(card, bg="#FFFFFF")
+        info_grid.pack(fill=tk.X, pady=4)
+
+        # Hardware ID
+        tk.Label(info_grid, text="Hardware / Machine ID:", font=get_sys_font(9, "bold"), bg="#FFFFFF", fg="#475569").grid(row=0, column=0, sticky="w", pady=4)
+        hw_row = tk.Frame(info_grid, bg="#FFFFFF")
+        hw_row.grid(row=0, column=1, sticky="w", padx=8, pady=4)
+        hw_lbl = tk.Label(hw_row, text=formatted_mac, font=get_sys_font(9, "bold"), fg="#0E7490", bg="#E0F2FE", padx=6, pady=2, relief=tk.SOLID, bd=1)
+        hw_lbl.pack(side=tk.LEFT)
+        def copy_hw():
+            self.dialog.clipboard_clear()
+            self.dialog.clipboard_append(formatted_mac)
+            messagebox.showinfo("Copied", "Hardware ID copied to clipboard!", parent=self.dialog)
+        ttk.Button(hw_row, text="📋 Copy", style="Tool3D.TButton", command=copy_hw).pack(side=tk.LEFT, padx=6)
+
+        # License Key
+        tk.Label(info_grid, text="Current License Key:", font=get_sys_font(9, "bold"), bg="#FFFFFF", fg="#475569").grid(row=1, column=0, sticky="w", pady=4)
+        disp_key = key if key else "Not Activated"
+        tk.Label(info_grid, text=disp_key, font=get_sys_font(9, "bold"), fg="#1E293B", bg="#F1F5F9", padx=6, pady=2, relief=tk.SOLID, bd=1).grid(row=1, column=1, sticky="w", padx=8, pady=4)
+
+        # Validity
+        tk.Label(info_grid, text="License Validity:", font=get_sys_font(9, "bold"), bg="#FFFFFF", fg="#475569").grid(row=2, column=0, sticky="w", pady=4)
+        if status == "active":
+            validity_text = "🟢 Active (Lifetime)" if expiredate == "never" else f"🟢 Active (Expires: {expiredate})"
+            val_color = "#047857"
+        elif status == "expired":
+            validity_text = f"🔴 Expired on {expiredate}"
+            val_color = "#DC2626"
+        else:
+            validity_text = "🟡 Inactive / Demo Mode"
+            val_color = "#D97706"
+
+        tk.Label(info_grid, text=validity_text, font=get_sys_font(9, "bold"), fg=val_color, bg="#FFFFFF").grid(row=2, column=1, sticky="w", padx=8, pady=4)
+
+        # License Renewal Card
+        renew_card = tk.Frame(parent, bg="#F0FDF4", relief=tk.GROOVE, bd=1, padx=12, pady=10)
+        renew_card.pack(fill=tk.X, pady=(5, 10))
+
+        tk.Label(renew_card, text="🔄 Renew or Upgrade License", font=get_sys_font(10, "bold"), fg="#065F46", bg="#F0FDF4").pack(anchor=tk.W)
+        tk.Label(
+            renew_card,
+            text="If your license is nearing expiry or expired, you can renew it immediately via our official payment portal:\nhttps://pay.a-b-infotech.in/license.php",
+            font=get_sys_font(8), fg="#047857", bg="#F0FDF4", justify="left"
+        ).pack(anchor=tk.W, pady=(4, 8))
+
+        btn_box = tk.Frame(renew_card, bg="#F0FDF4")
+        btn_box.pack(anchor=tk.W)
+
+        def open_renew():
+            webbrowser.open("https://pay.a-b-infotech.in/license.php")
+
+        btn_renew = ttk.Button(btn_box, text="🌐 RENEW LICENSE ONLINE", style="Primary3D.TButton", command=open_renew)
+        btn_renew.pack(side=tk.LEFT, padx=(0, 8), ipady=2)
+
+        def prompt_activate():
+            self.dialog.destroy()
+            self.main_app._show_activation_screen()
+
+        btn_activate = ttk.Button(btn_box, text="🔑 Enter New License Key", style="Tool3D.TButton", command=prompt_activate)
+        btn_activate.pack(side=tk.LEFT)
+
+    def _build_drivers_tab(self, parent):
+        ext_hint = ".dll" if CURRENT_OS == 'Windows' else (".dylib/.so" if CURRENT_OS == 'Darwin' else ".so")
+
+        # Top Add Form
+        add_card = tk.Frame(parent, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=10, pady=10)
+        add_card.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(add_card, text="Register Custom Hardware Token Driver (PKCS#11)", font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
+        tk.Label(
+            add_card,
+            text=f"If your USB token is not in the default list, browse and select its PKCS#11 library ({ext_hint}):",
+            font=get_sys_font(8), fg="#64748B", bg="#FFFFFF"
+        ).pack(anchor=tk.W, pady=(2, 6))
+
+        form_f = tk.Frame(add_card, bg="#FFFFFF")
+        form_f.pack(fill=tk.X)
+
+        tk.Label(form_f, text="Token Name / Label:", font=get_sys_font(8, "bold"), bg="#FFFFFF", fg="#334155").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Entry(form_f, textvariable=self.driver_name_var, width=32, font=get_sys_font(8)).grid(row=0, column=1, sticky="w", padx=6, pady=3)
+
+        tk.Label(form_f, text=f"Driver Library File ({ext_hint}):", font=get_sys_font(8, "bold"), bg="#FFFFFF", fg="#334155").grid(row=1, column=0, sticky="w", pady=3)
+        path_box = tk.Frame(form_f, bg="#FFFFFF")
+        path_box.grid(row=1, column=1, sticky="we", padx=6, pady=3)
+        ttk.Entry(path_box, textvariable=self.driver_path_var, width=38, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(path_box, text="Browse...", style="Tool3D.TButton", command=self._browse_driver_file).pack(side=tk.LEFT, padx=(4, 0))
+
+        # Action Buttons
+        btn_f = tk.Frame(add_card, bg="#FFFFFF")
+        btn_f.pack(anchor=tk.W, pady=(8, 2))
+        ttk.Button(btn_f, text="🧪 Test Driver Library", style="Tool3D.TButton", command=self._test_driver).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_f, text="➕ Add & Save Driver", style="Primary3D.TButton", command=self._add_driver).pack(side=tk.LEFT)
+
+        # Existing Custom Drivers List
+        list_card = tk.Frame(parent, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=10, pady=8)
+        list_card.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(list_card, text="Active Custom Token Drivers:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
+
+        tree_f = tk.Frame(list_card, bg="#FFFFFF")
+        tree_f.pack(fill=tk.BOTH, expand=True, pady=4)
+
+        self.tree = ttk.Treeview(tree_f, columns=("Name", "Path"), show="headings", height=5)
+        self.tree.heading("Name", text="Token Name")
+        self.tree.heading("Path", text="Driver File Path")
+        self.tree.column("Name", width=160)
+        self.tree.column("Path", width=380)
+
+        tree_scroll = ttk.Scrollbar(tree_f, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._populate_tree()
+
+        # Delete Button
+        ttk.Button(list_card, text="🗑️ Remove Selected Driver", style="Tool3D.TButton", command=self._remove_driver).pack(anchor=tk.E, pady=(4, 0))
+
+    def _browse_driver_file(self):
+        if CURRENT_OS == 'Windows':
+            ftypes = [("Dynamic Link Library (*.dll)", "*.dll"), ("All Files", "*.*")]
+        elif CURRENT_OS == 'Darwin':
+            ftypes = [("Dynamic Library (*.dylib;*.so)", "*.dylib;*.so"), ("All Files", "*.*")]
+        else:
+            ftypes = [("Shared Object (*.so)", "*.so*"), ("All Files", "*.*")]
+
+        p = filedialog.askopenfilename(title=f"Select PKCS#11 Driver Library ({CURRENT_OS})", filetypes=ftypes, parent=self.dialog)
+        if p:
+            self.driver_path_var.set(p)
+            if not self.driver_name_var.get():
+                base = os.path.basename(p)
+                name_guess = os.path.splitext(base)[0].upper()
+                self.driver_name_var.set(f"Token ({name_guess})")
+
+    def _test_driver(self):
+        p = self.driver_path_var.get().strip()
+        if not p or not os.path.exists(p):
+            return messagebox.showerror("File Error", "Please select a valid driver library file first.", parent=self.dialog)
+
+        try:
+            lib = pkcs11.lib(p)
+            slots = lib.get_slots(token_present=False)
+            messagebox.showinfo(
+                "Driver Test Successful",
+                f"✓ Successfully initialized PKCS#11 Library!\nPath: {p}\nAvailable Slots: {len(slots)}",
+                parent=self.dialog
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Driver Test Failed",
+                f"Could not initialize PKCS#11 driver:\n{str(e)}\n\nMake sure the driver architecture (32/64-bit) matches your OS.",
+                parent=self.dialog
+            )
+
+    def _add_driver(self):
+        name = self.driver_name_var.get().strip()
+        path = self.driver_path_var.get().strip()
+        if not name:
+            return messagebox.showerror("Input Error", "Please enter a Token Name.", parent=self.dialog)
+        if not path or not os.path.exists(path):
+            return messagebox.showerror("Input Error", "Please select a valid existing driver file.", parent=self.dialog)
+
+        self.custom_drivers[name] = path
+        save_custom_drivers(self.custom_drivers)
+        self._populate_tree()
+
+        # Update main app combobox and select it
+        driver_label = f"⭐ {name}"
+        self.main_app.reload_drivers(select_driver=driver_label)
+
+        messagebox.showinfo("Driver Added", f"Custom token driver '{name}' saved successfully and activated!", parent=self.dialog)
+        self.driver_name_var.set("")
+        self.driver_path_var.set("")
+
+    def _remove_driver(self):
+        sel = self.tree.selection()
+        if not sel:
+            return messagebox.showwarning("Select Driver", "Please select a driver from the list to remove.", parent=self.dialog)
+
+        name = self.tree.item(sel[0])['values'][0]
+        if name in self.custom_drivers:
+            del self.custom_drivers[name]
+            save_custom_drivers(self.custom_drivers)
+            self._populate_tree()
+            self.main_app.reload_drivers()
+            messagebox.showinfo("Removed", f"Driver '{name}' removed successfully.", parent=self.dialog)
+
+    def _populate_tree(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for name, path in self.custom_drivers.items():
+            self.tree.insert("", tk.END, values=(name, path))
 
 # ==========================================
 # 5. SYSTEM TRAY & BACKGROUND THREAD LOGIC
