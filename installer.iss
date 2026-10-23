@@ -22,9 +22,9 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={pf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 
-OutputDir=C:\xampp\htdocs\pdf\downloads
+OutputDir=downloads
 OutputBaseFilename=Abinfo_Signer_Windows_Setup
-SetupIconFile=C:\xampp\htdocs\pdf\icon.ico
+SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\{#MyAppIconName}
 Compression=lzma
 SolidCompression=yes
@@ -40,11 +40,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; Ensure the exe and the icon are installed in the destination folder
-Source: "C:\xampp\htdocs\pdf\dist\Abinfo_Signer_Offline.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\xampp\htdocs\pdf\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\Abinfo_Signer_Offline.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Certificate to be installed (put in {tmp} so it deletes itself automatically after installation)
-Source: "C:\xampp\htdocs\pdf\ab_infotech_ca_cert.cer"; DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "ab_infotech_ca_cert.cer"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIconName}"
