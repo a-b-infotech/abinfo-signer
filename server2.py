@@ -264,6 +264,32 @@ class LicenseManager:
 # ==========================================
 # 1. CROSS-PLATFORM DRIVER MAPPING
 # ==========================================
+def find_epass_driver_path():
+    """Dynamically finds the installed ePass2003 PKCS#11 driver on the system."""
+    candidates = [
+        r"C:\Program Files (x86)\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
+        r"C:\Program Files\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
+        r"C:\Windows\System32\eps2003csp11v2.dll",
+        r"C:\Windows\SysWOW64\eps2003csp11v2.dll",
+        r"C:\Windows\System32\eps2003csp11.dll",
+        r"C:\Windows\SysWOW64\eps2003csp11.dll",
+        r"C:\Program Files\ePass2003-India-Auto\eps2003csp11v2.dll",
+        r"C:\Program Files (x86)\ePass2003-India-Auto\eps2003csp11v2.dll",
+        r"C:\Program Files\EnterSafe\ePass2003\eps2003csp11v2.dll",
+        r"C:\Program Files (x86)\EnterSafe\ePass2003\eps2003csp11v2.dll"
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    try:
+        import glob
+        ds = glob.glob(r"C:\Windows\System32\DriverStore\FileRepository\eps2003*\eps2003*.dll")
+        if ds:
+            return ds[0]
+    except Exception:
+        pass
+    return r"C:\Windows\System32\eps2003csp11v2.dll"
+
 def get_platform_drivers():
     """Returns detected PKCS#11 drivers based on current Operating System."""
     drivers = {}
@@ -273,57 +299,26 @@ def get_platform_drivers():
         p32 = r"C:\WINDOWS\sysWOW64\cryptoida_pkcs11.dll"
         mtoken = p64 if (is_64bit and os.path.exists(p64)) else p32
 
-        candidates = {
-            "ProxKey India": r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdpkcs.dll",
-            "mToken / CryptoID": mtoken,
-            "ePass2003 Token": r"C:\Windows\System32\eps2003csp11v2.dll",
-            "InnaIT Token": r"C:\Windows\System32\InnaITPKCS11Driver.dll",
-            "Generic OpenSC": r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"
-        }
-        for name, path in candidates.items():
-            if os.path.exists(path):
-                drivers[name] = path
-            elif not drivers:
-                # Keep at least candidates as reference
-                drivers[name] = path
+        # Standard Indian Token Drivers (Always present in list)
+        drivers["ePass2003 Token"] = find_epass_driver_path()
+        drivers["ProxKey India"] = r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdpkcs.dll"
+        drivers["mToken / CryptoID"] = mtoken
+        drivers["InnaIT Token"] = r"C:\Windows\System32\InnaITPKCS11Driver.dll"
+        
+        opensc_win = r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"
+        if os.path.exists(opensc_win):
+            drivers["Generic OpenSC"] = opensc_win
+            
     elif CURRENT_OS == 'Darwin':  # macOS
-        candidates = {
-            "OpenSC (macOS Homebrew)": "/opt/homebrew/lib/opensc-pkcs11.so",
-            "OpenSC (macOS Intel)": "/usr/local/lib/opensc-pkcs11.so",
-            "OpenSC (Library)": "/Library/OpenSC/lib/opensc-pkcs11.so",
-            "mToken / CryptoID (macOS)": "/Library/mToken/libcryptoid_pkcs11.dylib",
-            "ePass2003 Token (macOS)": "/Library/EnterSafe/libcastle.dylib",
-            "ProxKey India (macOS)": "/Library/ProxKey/libWD_PKCS11.dylib"
-        }
-        for name, path in candidates.items():
-            if os.path.exists(path):
-                drivers[name] = path
-        if not drivers:
-            drivers = {
-                "OpenSC (macOS)": "/Library/OpenSC/lib/opensc-pkcs11.so",
-                "mToken (macOS)": "/Library/mToken/libcryptoid_pkcs11.dylib",
-                "ePass2003 (macOS)": "/Library/EnterSafe/libcastle.dylib",
-                "ProxKey (macOS)": "/Library/ProxKey/libWD_PKCS11.dylib"
-            }
+        drivers["ePass2003 Token (macOS)"] = "/Library/EnterSafe/libcastle.dylib"
+        drivers["ProxKey India (macOS)"] = "/Library/ProxKey/libWD_PKCS11.dylib"
+        drivers["mToken / CryptoID (macOS)"] = "/Library/mToken/libcryptoid_pkcs11.dylib"
+        drivers["OpenSC (macOS)"] = "/opt/homebrew/lib/opensc-pkcs11.so"
     else:  # Linux
-        candidates = {
-            "OpenSC (Ubuntu/Debian 64-bit)": "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
-            "OpenSC (RHEL/CentOS 64-bit)": "/usr/lib64/opensc-pkcs11.so",
-            "OpenSC (Generic Linux)": "/usr/lib/opensc-pkcs11.so",
-            "ProxKey (Watchdata Linux)": "/usr/lib/libWatchdataPKCS11.so",
-            "ePass2003 (Linux)": "/usr/lib/libcastle.so.1.0.0",
-            "mToken / CryptoID (Linux)": "/usr/lib/libcryptoid_pkcs11.so"
-        }
-        for name, path in candidates.items():
-            if os.path.exists(path):
-                drivers[name] = path
-        if not drivers:
-            drivers = {
-                "OpenSC (Linux)": "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
-                "ProxKey (Linux)": "/usr/lib/libWatchdataPKCS11.so",
-                "ePass2003 (Linux)": "/usr/lib/libcastle.so.1.0.0",
-                "mToken (Linux)": "/usr/lib/libcryptoid_pkcs11.so"
-            }
+        drivers["ePass2003 Token (Linux)"] = "/usr/lib/libcastle.so.1.0.0"
+        drivers["ProxKey India (Linux)"] = "/usr/lib/libWatchdataPKCS11.so"
+        drivers["mToken / CryptoID (Linux)"] = "/usr/lib/libcryptoid_pkcs11.so"
+        drivers["OpenSC (Linux)"] = "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
 
     drivers["[Browse Custom Driver Library...]"] = "__CUSTOM__"
     return drivers
@@ -689,13 +684,29 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                 c.roundRect(ax, ay, aw, ah, 5, stroke=1, fill=1)
 
                 # Accent Header Stripe
-                stripe_h = max(min(ah * 0.18, 14.0), 5.0)
+                stripe_h = max(min(ah * 0.20, 20.0), 13.0)
                 c.setFillColor(HexColor('#0F766E'))
                 c.roundRect(ax + 0.6, ay + ah - stripe_h, aw - 1.2, stripe_h, 3, stroke=0, fill=1)
 
+                # 1. Background Checkmark Watermark (Right Tick in background)
+                c.saveState()
+                c.setStrokeColor(HexColor('#0F766E'), alpha=0.14)
+                c.setLineWidth(max(ah * 0.08, 3.5))
+                c.setLineCap(1)
+                c.setLineJoin(1)
+                bx = ax + aw * 0.78
+                by = ay + ah * 0.40
+                bsize = min(ah * 0.65, aw * 0.40)
+                p_bg = c.beginPath()
+                p_bg.moveTo(bx - bsize * 0.42, by)
+                p_bg.lineTo(bx - bsize * 0.10, by - bsize * 0.32)
+                p_bg.lineTo(bx + bsize * 0.42, by + bsize * 0.42)
+                c.drawPath(p_bg, stroke=1, fill=0)
+                c.restoreState()
+
                 # Watermark Icon/Text
-                c.setFillColor(HexColor('#0F766E'), alpha=0.08)
-                c.setFont('Helvetica-Bold', max(min(ah * 0.45, 26.0), 8.0))
+                c.setFillColor(HexColor('#0F766E'), alpha=0.07)
+                c.setFont('Helvetica-Bold', max(min(ah * 0.38, 20.0), 7.0))
                 c.drawRightString(ax + aw - 8, ay + 6, "DIGITALLY SIGNED")
 
                 # Text Content Lines
@@ -730,9 +741,34 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                 cur_y = start_y
                 for ltype, text in lines:
                     if ltype == 'HEADER':
-                        c.setFont('Helvetica-Bold', min(fs * 1.05, 11.0))
-                        c.setFillColor(HexColor('#FFFFFF'))  # White text inside the stripe
-                        c.drawString(ax + pad_x, ay + ah - stripe_h + (stripe_h - min(fs * 1.05, 11.0)) / 2.0, text)
+                        # 2. Checkmark Badge in Header (Right Tick in sign)
+                        badge_r = min(stripe_h * 0.34, 5.5)
+                        badge_cx = ax + pad_x + badge_r
+                        header_cy = ay + ah - (stripe_h / 2.0)
+
+                        # Green Circle Badge
+                        c.setFillColor(HexColor('#10B981'))
+                        c.circle(badge_cx, header_cy, badge_r, stroke=0, fill=1)
+
+                        # White Checkmark inside Badge
+                        c.saveState()
+                        c.setStrokeColor(HexColor('#FFFFFF'))
+                        c.setLineWidth(max(badge_r * 0.28, 1.2))
+                        c.setLineCap(1)
+                        c.setLineJoin(1)
+                        p_badge = c.beginPath()
+                        p_badge.moveTo(badge_cx - badge_r * 0.48, header_cy - badge_r * 0.05)
+                        p_badge.lineTo(badge_cx - badge_r * 0.12, header_cy - badge_r * 0.40)
+                        p_badge.lineTo(badge_cx + badge_r * 0.50, header_cy + badge_r * 0.40)
+                        c.drawPath(p_badge, stroke=1, fill=0)
+                        c.restoreState()
+
+                        # Header text following the tick badge
+                        header_tx = badge_cx + badge_r + 5.0
+                        header_fs = min(fs * 1.05, 11.0)
+                        c.setFont('Helvetica-Bold', header_fs)
+                        c.setFillColor(HexColor('#FFFFFF'))
+                        c.drawString(header_tx, header_cy - (header_fs / 2.8), text)
                         continue
                     elif ltype == 'NAME':
                         c.setFont('Helvetica-Bold', fs)
@@ -1384,8 +1420,12 @@ class VisualPdfSignerApp:
             if not driver or driver == "__CUSTOM__": return
 
         if not os.path.exists(driver):
-            messagebox.showerror("Driver Missing", f"Could not find driver library at:\n\n{driver}\n\nPlease install your Token middleware or browse for the correct library.")
-            return
+            if "ePass" in self.driver_var.get():
+                driver = find_epass_driver_path()
+                DRIVER_MAP[self.driver_var.get()] = driver
+            if not os.path.exists(driver):
+                messagebox.showerror("Driver Missing", f"Could not find driver library at:\n\n{driver}\n\nPlease install your Token middleware or browse for the correct library.")
+                return
 
         try:
             self.loaded_certs = []
