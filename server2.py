@@ -697,12 +697,15 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
             pw = float(page.mediabox.width if hasattr(page.mediabox, 'width') else page.mediaBox.getWidth())
             ph = float(page.mediabox.height if hasattr(page.mediabox, 'height') else page.mediaBox.getHeight())
 
+            offset_x = float(page.mediabox.left if hasattr(page.mediabox, 'left') else page.mediaBox.getLowerLeft_x())
+            offset_y = float(page.mediabox.bottom if hasattr(page.mediabox, 'bottom') else page.mediaBox.getLowerLeft_y())
+
             packet = io.BytesIO()
             c = rl_canvas.Canvas(packet, pagesize=(pw, ph))
 
             for area in p_areas:
-                ax = float(area['x'])
-                ay = float(area['y'])
+                ax = float(area['x']) + offset_x
+                ay = float(area['y']) + offset_y
                 aw = float(area['width'])
                 ah = float(area['height'])
 
