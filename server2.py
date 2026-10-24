@@ -717,13 +717,19 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                 c.setFillColor(HexColor('#EBF6F9'), alpha=0.96)
                 c.setStrokeColor(HexColor('#0E7490'))
                 c.setLineWidth(1.2)
-                c.roundRect(ax, ay, aw, ah, 6, stroke=1, fill=1)
+                c.roundRect(ax, ay, aw, ah, 5, stroke=1, fill=1)
                 c.restoreState()
+
+                # Clip strictly to the box interior so text NEVER bleeds outside
+                c.saveState()
+                clip_p = c.beginPath()
+                clip_p.roundRect(ax, ay, aw, ah, 5)
+                c.clipPath(clip_p, stroke=0, fill=0)
 
                 # Prominent Green Right Tick Mark (✔) Watermark on right side
                 c.saveState()
                 c.setStrokeColor(HexColor('#10B981'), alpha=0.45)
-                c.setLineWidth(max(ah * 0.10, 4.0))
+                c.setLineWidth(max(ah * 0.10, 3.0))
                 c.setLineCap(1)  # Round cap
                 c.setLineJoin(1) # Round join
 
@@ -753,22 +759,24 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                     lines.append(('TEXT', f"State:- {state}"))
                 lines.append(('DATE', f"Date:- {now_ist}"))
 
-                pad_x = max(aw * 0.05, 8.0)
-                pad_top = 8.0
-                pad_bot = 6.0
-                avail_h = max(ah - pad_top - pad_bot, 10.0)
-
                 n_lines = len(lines)
-                line_step = avail_h / float(n_lines)
+                pad_x = max(aw * 0.04, 6.0)
+                pad_top = max(ah * 0.06, 3.5)
+                pad_bot = max(ah * 0.05, 3.5)
+                avail_h = max(ah - pad_top - pad_bot, 8.0)
+                avail_w = max(aw - (pad_x * 2.0), 20.0)
 
-                fs_h = line_step * 0.76
+                # Dynamic Scaling so ALL lines ALWAYS fit inside the box
+                max_fs_from_height = avail_h / float((n_lines - 1) * 1.18 + 1.0)
                 max_str_len = max(len(t) for _, t in lines)
-                fs_w = (aw - pad_x * 2) / (max_str_len * 0.54)
-                fs = min(fs_h, fs_w, 10.5)
-                fs = max(fs, 4.0)
+                max_fs_from_width = avail_w / float(max_str_len * 0.53)
+                fs = min(max_fs_from_height, max_fs_from_width, 10.5)
+                fs = max(fs, 2.5)
 
-                line_step = max(fs * 1.22, avail_h / float(n_lines))
-                start_y = ay + ah - pad_top - fs
+                line_step = (avail_h - fs) / float(max(n_lines - 1, 1))
+                line_step = min(line_step, fs * 1.30)
+                total_h = (n_lines - 1) * line_step + fs
+                start_y = ay + ah - pad_top - fs - max(0.0, (avail_h - total_h) / 2.0)
 
                 cur_y = start_y
                 for ltype, text in lines:
@@ -779,14 +787,16 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                         c.setFont('Helvetica-Bold', fs)
                         c.setFillColor(HexColor('#0F172A'))
                     elif ltype == 'DATE':
-                        c.setFont('Helvetica-Bold', max(fs * 0.96, 4.0))
+                        c.setFont('Helvetica-Bold', max(fs * 0.95, 2.5))
                         c.setFillColor(HexColor('#1E3A8A'))
                     else:
-                        c.setFont('Helvetica', max(fs * 0.96, 4.0))
+                        c.setFont('Helvetica', max(fs * 0.95, 2.5))
                         c.setFillColor(HexColor('#334155'))
 
                     c.drawString(ax + pad_x, cur_y, text)
                     cur_y -= line_step
+
+                c.restoreState() # Restore from clipPath
 
             c.save(); packet.seek(0)
             overlay_page = PdfReader(packet).pages[0] if hasattr(PdfReader(packet), 'pages') else PdfReader(packet).getPage(0)
@@ -1798,59 +1808,137 @@ class BatchSignDialog:
     def __init__(self, parent, main_app):
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"📁 Batch Sign PDF Folder [{CURRENT_OS}]")
-        self.dialog.geometry("640x520")
+        self.dialog.geometry("680x620")
+        self.dialog.minsize(620, 560)
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
         self.main_app = main_app
+        if hasattr(self.main_app, '_apply_window_icon'):
+            self.main_app._apply_window_icon(self.dialog)
+
         self.in_dir_var = tk.StringVar()
         self.out_dir_var = tk.StringVar()
+        self.page_opt_var = tk.StringVar(value="All Pages (Sign Every Page)")
 
+        default_pos = "Use Box Drawn on Main Viewer" if self.main_app.signature_areas else "Bottom-Right Corner (220 x 70 pt)"
+        self.pos_opt_var = tk.StringVar(value=default_pos)
+
+        self.is_running = False
+        self.is_cancelled = False
+
+        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
 
+    def _on_close(self):
+        if self.is_running:
+            if messagebox.askyesno("Cancel Batch", "Batch signing is currently in progress.\nDo you want to stop and close?", parent=self.dialog):
+                self.is_cancelled = True
+                self.dialog.destroy()
+        else:
+            self.dialog.destroy()
+
     def _build_ui(self):
-        f = ttk.Frame(self.dialog, padding="14")
+        f = ttk.Frame(self.dialog, padding="16")
         f.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(f, text="Batch Sign All PDFs in Folder", font=get_sys_font(12, "bold"), foreground="#1E40AF").pack(anchor=tk.W, pady=(0, 10))
+        header_frame = ttk.Frame(f)
+        header_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(header_frame, text="📁 Batch Sign All PDFs in Folder", font=get_sys_font(13, "bold"), foreground="#1E40AF").pack(anchor=tk.W)
+        ttk.Label(header_frame, text="Sign multiple PDF files automatically using active USB Token or Software Certificate.", font=get_sys_font(8), foreground="#475569").pack(anchor=tk.W)
 
-        # Input Directory
-        ttk.Label(f, text="1. Select Input Folder (containing PDF files):", font=get_sys_font(9, "bold")).pack(anchor=tk.W)
+        # 1. Input Directory
+        ttk.Label(f, text="1. Select Input Folder (containing PDF files):", font=get_sys_font(9, "bold")).pack(anchor=tk.W, pady=(4, 2))
         in_row = ttk.Frame(f)
-        in_row.pack(fill=tk.X, pady=(3, 10))
+        in_row.pack(fill=tk.X, pady=(0, 4))
         ttk.Entry(in_row, textvariable=self.in_dir_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         ttk.Button(in_row, text="Browse...", style="Tool3D.TButton", command=self._browse_in).pack(side=tk.RIGHT)
 
-        # Output Directory
-        ttk.Label(f, text="2. Select Output Folder (where signed PDFs will be saved):", font=get_sys_font(9, "bold")).pack(anchor=tk.W)
+        self.lbl_found = tk.Label(f, text="No folder selected yet.", font=get_sys_font(8, "italic"), fg="#64748B", anchor="w")
+        self.lbl_found.pack(fill=tk.X, pady=(0, 8))
+
+        # 2. Output Directory
+        ttk.Label(f, text="2. Select Output Folder (where signed PDFs will be saved):", font=get_sys_font(9, "bold")).pack(anchor=tk.W, pady=(2, 2))
         out_row = ttk.Frame(f)
-        out_row.pack(fill=tk.X, pady=(3, 10))
+        out_row.pack(fill=tk.X, pady=(0, 10))
         ttk.Entry(out_row, textvariable=self.out_dir_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         ttk.Button(out_row, text="Browse...", style="Tool3D.TButton", command=self._browse_out).pack(side=tk.RIGHT)
 
-        # Info Box
-        info_frame = tk.Frame(f, bg="#F0FDF4", relief=tk.SUNKEN, bd=1, padx=8, pady=8)
-        info_frame.pack(fill=tk.X, pady=(5, 10))
+        # 3. Signing Options Frame (Target Pages & Box Position)
+        opts_frame = ttk.LabelFrame(f, text=" 3. Batch Placement Options ", padding="10")
+        opts_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Target Pages Option
+        page_col = ttk.Frame(opts_frame)
+        page_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ttk.Label(page_col, text="Pages to Sign in Each Document:", font=get_sys_font(8, "bold")).pack(anchor=tk.W, pady=(0, 2))
+        page_combo = ttk.Combobox(
+            page_col, textvariable=self.page_opt_var, state="readonly",
+            values=[
+                "All Pages (Sign Every Page)",
+                "Last Page Only",
+                "First Page Only (Page 1)",
+                "Same Page as Drawn Box"
+            ]
+        )
+        page_combo.pack(fill=tk.X)
+
+        # Signature Position Option
+        pos_col = ttk.Frame(opts_frame)
+        pos_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        ttk.Label(pos_col, text="Signature Box Position:", font=get_sys_font(8, "bold")).pack(anchor=tk.W, pady=(0, 2))
+        pos_values = []
+        if self.main_app.signature_areas:
+            pos_values.append("Use Box Drawn on Main Viewer")
+        pos_values.extend([
+            "Bottom-Right Corner (220 x 70 pt)",
+            "Bottom-Left Corner (220 x 70 pt)",
+            "Top-Right Corner (220 x 70 pt)",
+            "Top-Left Corner (220 x 70 pt)"
+        ])
+        pos_combo = ttk.Combobox(pos_col, textvariable=self.pos_opt_var, state="readonly", values=pos_values)
+        pos_combo.pack(fill=tk.X)
+
+        # 4. Active Certificate Summary Badge
+        cert_info_frame = tk.Frame(f, bg="#F8FAFC", relief=tk.SOLID, bd=1, padx=10, pady=8)
+        cert_info_frame.pack(fill=tk.X, pady=(0, 10))
+
+        mode = self.main_app.cert_source_var.get()
+        if mode == "pfx":
+            pfx_file = os.path.basename(self.main_app.pfx_path_var.get()) or "None selected"
+            info_text = f"🔐 Active Signing Source: Software Certificate (.pfx/.p12)\n📄 File: {pfx_file}"
+            info_color = "#0369A1"
+        else:
+            driver_name = self.main_app.driver_var.get() or "No Driver"
+            cert_val = self.main_app.cert_combo.get() or "None loaded/selected"
+            info_text = f"🔐 Active Signing Source: USB Hardware Token ({driver_name})\n📜 Certificate: {cert_val}"
+            info_color = "#047857"
+
         tk.Label(
-            info_frame,
-            text="ℹ️ Every PDF in the input folder will be signed across all pages\nusing the signature area defined on the main viewer screen.",
-            bg="#F0FDF4", fg="#065F46", font=get_sys_font(8), justify="left"
-        ).pack(anchor=tk.W)
+            cert_info_frame, text=info_text, bg="#F8FAFC", fg=info_color,
+            font=get_sys_font(8, "bold"), justify="left", anchor="w"
+        ).pack(fill=tk.X)
 
-        # Progress Display
-        self.prog_var = tk.DoubleVar()
-        self.prog_bar = ttk.Progressbar(f, variable=self.prog_var, maximum=100)
-        self.prog_bar.pack(fill=tk.X, pady=(10, 5))
+        # 5. Progress Display
+        prog_frame = ttk.Frame(f)
+        prog_frame.pack(fill=tk.X, pady=(5, 10))
 
-        self.lbl_progress = tk.Label(f, text="Ready to start batch processing.", font=get_sys_font(8), fg="#475569")
-        self.lbl_progress.pack(anchor=tk.W)
+        self.prog_var = tk.DoubleVar(value=0.0)
+        self.prog_bar = ttk.Progressbar(prog_frame, variable=self.prog_var, maximum=100)
+        self.prog_bar.pack(fill=tk.X, pady=(0, 4))
 
-        # Action Buttons
+        self.lbl_progress = tk.Label(prog_frame, text="Ready to start batch processing.", font=get_sys_font(8), fg="#475569", anchor="w")
+        self.lbl_progress.pack(fill=tk.X)
+
+        # 6. Action Buttons
         btn_row = ttk.Frame(f)
         btn_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+
+        ttk.Button(btn_row, text="Close", style="Tool3D.TButton", command=self._on_close).pack(side=tk.RIGHT, padx=4)
+        self.btn_stop = ttk.Button(btn_row, text="⏹️ Cancel / Stop", style="Tool3D.TButton", command=self._stop_batch, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.RIGHT, padx=4)
         self.btn_start = ttk.Button(btn_row, text="🚀 START BATCH SIGNING", style="Batch.TButton", command=self._start_batch)
         self.btn_start.pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn_row, text="Close", style="Tool3D.TButton", command=self.dialog.destroy).pack(side=tk.RIGHT)
 
     def _browse_in(self):
         d = filedialog.askdirectory(title="Select Input Folder Containing PDFs")
@@ -1858,36 +1946,78 @@ class BatchSignDialog:
             self.in_dir_var.set(d)
             if not self.out_dir_var.get():
                 self.out_dir_var.set(os.path.join(d, "Signed_PDFs"))
+            try:
+                pdf_files = [f for f in os.listdir(d) if f.lower().endswith('.pdf')]
+                self.lbl_found.config(text=f"✓ Found {len(pdf_files)} PDF file(s) in selected folder.", fg="#047857")
+            except Exception:
+                pass
 
     def _browse_out(self):
         d = filedialog.askdirectory(title="Select Output Folder")
-        if d: self.out_dir_var.set(d)
+        if d:
+            self.out_dir_var.set(d)
+
+    def _stop_batch(self):
+        if self.is_running:
+            self.is_cancelled = True
+            self.lbl_progress.config(text="Stopping batch process... Please wait.", fg="#DC2626")
+            self.btn_stop.config(state=tk.DISABLED)
 
     def _start_batch(self):
         in_dir = self.in_dir_var.get().strip()
         out_dir = self.out_dir_var.get().strip()
         if not in_dir or not os.path.exists(in_dir):
-            return messagebox.showerror("Error", "Please select a valid input directory.", parent=self.dialog)
+            return messagebox.showerror("Input Folder Error", "Please select a valid input directory.", parent=self.dialog)
         if not out_dir:
-            return messagebox.showerror("Error", "Please specify an output directory.", parent=self.dialog)
-        if not self.main_app.signature_areas:
-            return messagebox.showwarning("Warning", "Please draw a signature box on the main document viewer first.", parent=self.dialog)
+            return messagebox.showerror("Output Folder Error", "Please specify an output directory.", parent=self.dialog)
+
+        # Pre-flight Certificate Credential Checks
+        mode = self.main_app.cert_source_var.get()
+        if mode == "pfx":
+            pfx_path = self.main_app.pfx_path_var.get().strip()
+            pfx_pass = self.main_app.pfx_pass_var.get()
+            if not pfx_path or not os.path.exists(pfx_path):
+                return messagebox.showerror("PFX Certificate Missing", "Please select a valid .pfx / .p12 certificate file on the main screen.", parent=self.dialog)
+            if not pfx_pass:
+                return messagebox.showerror("PFX Password Missing", "Please enter the password for your .pfx certificate on the main screen.", parent=self.dialog)
+        else:
+            driver_path = DRIVER_MAP.get(self.main_app.driver_var.get())
+            if not driver_path or not os.path.exists(driver_path):
+                return messagebox.showerror("Driver Missing", "Could not find the hardware token driver.\nPlease ensure your Token software is installed.", parent=self.dialog)
+            if not self.main_app.loaded_certs:
+                return messagebox.showerror("Certificates Not Loaded", "Please click 'Load Certificates' and select your certificate on the main screen first.", parent=self.dialog)
+            idx = self.main_app.cert_combo.current()
+            if idx < 0:
+                return messagebox.showerror("Certificate Not Selected", "Please select a certificate from the dropdown on the main screen.", parent=self.dialog)
+            pin = self.main_app.pin_var.get()
+            if not pin:
+                return messagebox.showerror("Token PIN Missing", "Please enter your hardware token PIN on the main screen.", parent=self.dialog)
+
+        pos_opt = self.pos_opt_var.get()
+        if pos_opt.startswith("Use Box Drawn") and not self.main_app.signature_areas:
+            return messagebox.showwarning("Warning", "No signature box has been drawn on the main viewer.\nPlease select a corner position or draw a box first.", parent=self.dialog)
 
         os.makedirs(out_dir, exist_ok=True)
         pdf_files = [f for f in os.listdir(in_dir) if f.lower().endswith('.pdf')]
         if not pdf_files:
             return messagebox.showinfo("No PDFs", "No PDF files were found in the selected input directory.", parent=self.dialog)
 
+        self.is_running = True
+        self.is_cancelled = False
         self.btn_start.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL)
+
         thread = threading.Thread(target=self._batch_worker, args=(in_dir, out_dir, pdf_files))
         thread.start()
 
     def _batch_worker(self, in_dir, out_dir, pdf_files):
         total = len(pdf_files)
         success_cnt, fail_cnt = 0, 0
-        template_area = self.main_app.signature_areas[0]
 
         mode = self.main_app.cert_source_var.get()
+        page_opt = self.page_opt_var.get()
+        pos_opt = self.pos_opt_var.get()
+
         signer, cert_parsed = None, None
         session, token = None, None
 
@@ -1904,8 +2034,14 @@ class BatchSignDialog:
 
                 lib = pkcs11.lib(driver_path)
                 for slot in lib.get_slots(token_present=True):
-                    try: token = slot.get_token(); break
-                    except Exception: continue
+                    try:
+                        token = slot.get_token()
+                        break
+                    except Exception:
+                        continue
+                if not token:
+                    raise ValueError("Hardware USB Token not detected. Please ensure your USB Token is attached.")
+
                 session = token.open(user_pin=pin)
                 cert_id = None
                 for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
@@ -1913,32 +2049,79 @@ class BatchSignDialog:
                     if str(c.serial_number) == str(serial_number):
                         cert_id, cert_parsed = obj[pkcs11.Attribute.ID], c
                         break
+                if not cert_id:
+                    raise ValueError("Hardware Certificate not found on Token. Please verify your PIN and certificate selection.")
                 signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
 
-            try: tst_client = HTTPTimeStamper(TSA_URL)
-            except Exception: tst_client = None
+            try:
+                tst_client = HTTPTimeStamper(TSA_URL)
+            except Exception:
+                tst_client = None
 
             for i, fname in enumerate(pdf_files):
+                if self.is_cancelled:
+                    logger.info("Batch signing stopped early by user.")
+                    break
+
                 in_path = os.path.join(in_dir, fname)
                 out_path = os.path.join(out_dir, fname)
-                self.dialog.after(0, lambda f=fname, n=i+1: self.lbl_progress.config(text=f"Signing ({n}/{total}): {f}"))
+                self.dialog.after(0, lambda f=fname, n=i+1: self.lbl_progress.config(
+                    text=f"Signing ({n}/{total}): {f}", fg="#1E40AF"
+                ))
 
                 try:
-                    with open(in_path, 'rb') as f_in: pdf_data = f_in.read()
+                    with open(in_path, 'rb') as f_in:
+                        pdf_data = f_in.read()
+
                     doc = fitz.open(stream=pdf_data, filetype="pdf")
                     n_pages = len(doc)
+                    if n_pages <= 0:
+                        raise ValueError("PDF document has 0 pages.")
+
+                    # Determine target pages
+                    target_pages = []
+                    if page_opt == "First Page Only (Page 1)":
+                        target_pages = [0]
+                    elif page_opt == "Last Page Only":
+                        target_pages = [n_pages - 1]
+                    elif page_opt == "Same Page as Drawn Box":
+                        if self.main_app.signature_areas:
+                            tmpl_p = int(self.main_app.signature_areas[0].get('page', 0))
+                            target_pages = [min(tmpl_p, n_pages - 1)]
+                        else:
+                            target_pages = [0]
+                    else:  # All Pages (Sign Every Page)
+                        target_pages = list(range(n_pages))
+
                     areas = []
-                    for p in range(n_pages):
+                    for p in target_pages:
                         pw, ph = float(doc[p].rect.width), float(doc[p].rect.height)
-                        ax = float(template_area['x'])
-                        ay = float(template_area['y'])
-                        aw = min(float(template_area['width']), pw - ax)
-                        ah = min(float(template_area['height']), ph - ay)
+                        if pos_opt.startswith("Use Box Drawn") and self.main_app.signature_areas:
+                            tmpl = self.main_app.signature_areas[0]
+                            ax = float(tmpl['x'])
+                            ay = float(tmpl['y'])
+                            aw = min(float(tmpl['width']), pw - ax)
+                            ah = min(float(tmpl['height']), ph - ay)
+                        elif pos_opt.startswith("Bottom-Left"):
+                            aw, ah, m = 220.0, 70.0, 36.0
+                            ax, ay = m, m
+                        elif pos_opt.startswith("Top-Right"):
+                            aw, ah, m = 220.0, 70.0, 36.0
+                            ax, ay = max(pw - aw - m, m), max(ph - ah - m, m)
+                        elif pos_opt.startswith("Top-Left"):
+                            aw, ah, m = 220.0, 70.0, 36.0
+                            ax, ay = m, max(ph - ah - m, m)
+                        else:  # Bottom-Right Corner (default)
+                            aw, ah, m = 220.0, 70.0, 36.0
+                            ax, ay = max(pw - aw - m, m), m
+
                         areas.append({'page': p, 'x': ax, 'y': ay, 'width': aw, 'height': ah})
+
                     doc.close()
 
                     signed_bytes = sign_pdf_stream(pdf_data, areas, signer, cert_parsed, tst_client)
-                    with open(out_path, 'wb') as f_out: f_out.write(signed_bytes)
+                    with open(out_path, 'wb') as f_out:
+                        f_out.write(signed_bytes)
                     success_cnt += 1
                 except Exception as e:
                     logger.error(f"Batch signing error on {fname}: {e}")
@@ -1948,18 +2131,26 @@ class BatchSignDialog:
                 self.dialog.after(0, lambda p=prog: self.prog_var.set(p))
 
             if session:
-                try: session.close()
-                except Exception: pass
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
-            msg = f"Batch Signing Complete!\n\n✓ Successfully Signed: {success_cnt}\n❌ Failed: {fail_cnt}\nSaved in: {out_dir}"
-            self.dialog.after(0, lambda: messagebox.showinfo("Batch Finished", msg, parent=self.dialog))
-            self.dialog.after(0, lambda: self.lbl_progress.config(text=f"Complete! Signed {success_cnt}/{total} files."))
+            status_note = "Stopped by user" if self.is_cancelled else "Complete"
+            msg = f"Batch Signing {status_note}!\n\n✓ Successfully Signed: {success_cnt}\n❌ Failed / Skipped: {fail_cnt}\n\nSaved in:\n{out_dir}"
+            self.dialog.after(0, lambda: messagebox.showinfo("Batch Status", msg, parent=self.dialog))
+            self.dialog.after(0, lambda: self.lbl_progress.config(
+                text=f"{status_note}! Signed {success_cnt}/{total} files (Failed: {fail_cnt}).",
+                fg="#047857" if fail_cnt == 0 else "#B45309"
+            ))
 
         except Exception as batch_err:
             logger.error(f"Batch worker setup error: {batch_err}")
             self.dialog.after(0, lambda err=str(batch_err): messagebox.showerror("Batch Error", err, parent=self.dialog))
         finally:
+            self.is_running = False
             self.dialog.after(0, lambda: self.btn_start.config(state=tk.NORMAL))
+            self.dialog.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
 
 # ==========================================
 # 4.6. SETTINGS & CUSTOM DRIVERS DIALOG

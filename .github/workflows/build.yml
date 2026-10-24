@@ -175,7 +175,6 @@ jobs:
         run: |
           mkdir -p release_assets
           cp artifacts/Abinfo_Signer_Windows_Setup/Abinfo_Signer_Windows_Setup.exe release_assets/Abinfo_Signer_Windows_Setup.exe || true
-          cp artifacts/Abinfo_Signer_Windows_x64/Abinfo_Signer_Offline.exe release_assets/Abinfo_Signer_Windows.exe
           cp artifacts/Abinfo_Signer_Linux_x64/Abinfo_Signer_Linux_x64.tar.gz release_assets/Abinfo_Signer_Linux.tar.gz
           cp artifacts/Abinfo_Signer_macOS/Abinfo_Signer_macOS.zip release_assets/Abinfo_Signer_macOS.zip
           ls -la release_assets
@@ -192,7 +191,6 @@ jobs:
             ## ABInfo Digital PDF Signer v1.1
             Direct download links for official website integration:
             - **Windows Setup Installer**: [Abinfo_Signer_Windows_Setup.exe](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Windows_Setup.exe)
-            - **Windows Standalone Portable**: [Abinfo_Signer_Windows.exe](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Windows.exe)
             - **macOS Bundle**: [Abinfo_Signer_macOS.zip](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_macOS.zip)
             - **Linux Package**: [Abinfo_Signer_Linux.tar.gz](https://github.com/a-b-infotech/abinfo-signer/releases/latest/download/Abinfo_Signer_Linux.tar.gz)
           files: release_assets/*

@@ -22,6 +22,6 @@ Professional, cross-platform digital signature solution for PDF documents suppor
 
 ## Automated Multi-OS Builds (GitHub Actions)
 This repository includes a GitHub Actions workflow (`.github/workflows/build.yml`) that automatically builds standalone release packages for:
-- **Windows**: `Abinfo_Signer_Windows.exe` (Digitally signed with Authenticode)
+- **Windows**: `Abinfo_Signer_Windows_Setup.exe` (Official Windows Setup Installer with auto CA Certificate & Desktop shortcut)
 - **Linux**: `Abinfo_Signer_Linux.tar.gz` (ELF binary)
 - **macOS**: `Abinfo_Signer_macOS.zip` (Universal application bundle)
