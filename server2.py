@@ -503,6 +503,128 @@ def sync_callback():
         </body></html>
         """
 
+# Global GUI handles for IPC / Single-Instance wakeup
+gui_root = None
+gui_app = None
+_app_single_instance_mutex = None
+
+@app.route('/api/show_window', methods=['GET', 'POST'])
+def api_show_window():
+    """Brings the existing application window to the foreground when requested."""
+    global gui_root, gui_app
+    try:
+        if gui_root and gui_app:
+            gui_root.after(0, gui_app.show_window)
+            return jsonify({"status": "success", "message": "Window brought to front."})
+    except Exception as e:
+        logger.error(f"Error bringing window to front: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({"status": "not_ready"}), 200
+
+# ==========================================
+# 1.8. AUTOSTART & SINGLE-INSTANCE LOGIC
+# ==========================================
+AUTOSTART_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_APP_NAME = "ABInfoSigner"
+
+def get_app_launch_command(background=True):
+    flag = " --background" if background else ""
+    if getattr(sys, 'frozen', False):
+        exe_path = sys.executable
+        return f'"{exe_path}"{flag}'
+    else:
+        py_exe = sys.executable
+        dir_name = os.path.dirname(py_exe)
+        pyw = os.path.join(dir_name, "pythonw.exe")
+        runner = pyw if os.path.exists(pyw) else py_exe
+        script_path = os.path.abspath(__file__)
+        return f'"{runner}" "{script_path}"{flag}'
+
+def is_autostart_enabled():
+    if CURRENT_OS != 'Windows':
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_READ) as key:
+            val, _ = winreg.QueryValueEx(key, AUTOSTART_APP_NAME)
+            return bool(val)
+    except Exception:
+        return False
+
+def set_autostart(enable: bool):
+    if CURRENT_OS != 'Windows':
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enable:
+                cmd = get_app_launch_command(background=True)
+                winreg.SetValueEx(key, AUTOSTART_APP_NAME, 0, winreg.REG_SZ, cmd)
+                logger.info(f"Windows Autostart enabled: {cmd}")
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_APP_NAME)
+                    logger.info("Windows Autostart disabled.")
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set Windows autostart: {e}")
+        return False
+
+def check_single_instance_and_bring_to_front(wake_up=True):
+    """
+    Checks if an instance is already running.
+    If wake_up is True, asks the running instance to bring its window to the front.
+    Returns True if an instance is already running (caller should exit).
+    Returns False if this is the primary instance.
+    """
+    port = server_config.get('port', 5000)
+    ping_url = f"http://127.0.0.1:{port}/api/health"
+    show_url = f"http://127.0.0.1:{port}/api/show_window"
+
+    # Step 1: HTTP ping to existing Flask bridge
+    try:
+        req = urllib.request.Request(ping_url, method='GET')
+        with urllib.request.urlopen(req, timeout=0.8) as resp:
+            if resp.status == 200:
+                if wake_up:
+                    try:
+                        show_req = urllib.request.Request(show_url, method='POST')
+                        urllib.request.urlopen(show_req, timeout=1.0)
+                    except Exception:
+                        pass
+                logger.info("Existing instance detected via HTTP bridge. Exiting duplicate process.")
+                return True
+    except Exception:
+        pass
+
+    # Step 2: Windows Named Mutex
+    if CURRENT_OS == 'Windows':
+        try:
+            mutex_name = "Global\\ABInfo_Signer_SingleInstance_Mutex_v1"
+            mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+            last_err = ctypes.windll.kernel32.GetLastError()
+            if last_err == 183:  # ERROR_ALREADY_EXISTS
+                logger.info("Existing instance detected via Windows Named Mutex.")
+                if wake_up:
+                    for _ in range(4):
+                        time.sleep(0.25)
+                        try:
+                            show_req = urllib.request.Request(show_url, method='POST')
+                            with urllib.request.urlopen(show_req, timeout=0.8) as resp:
+                                if resp.status == 200:
+                                    break
+                        except Exception:
+                            pass
+                return True
+            global _app_single_instance_mutex
+            _app_single_instance_mutex = mutex
+        except Exception as e:
+            logger.warning(f"Windows single-instance mutex check error: {e}")
+
+    return False
+
 @app.route('/api/drivers')
 def api_drivers():
     return jsonify(list(DRIVER_MAP.keys()))
@@ -900,10 +1022,14 @@ def sign_pdf_stream(pdf_bytes, areas, signer, cert_parsed, tst_client=None):
 class VisualPdfSignerApp:
     def __init__(self, root):
         self.root = root
+        global gui_root, gui_app
+        gui_root = self.root
+        gui_app = self
+
         self.root.title(f"A B INFOTECH - Local Digital Signer v1.1 [{CURRENT_OS}]")
         self.root.geometry("1300x850")
         self.root.minsize(1024, 700)
-        self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
+        self.root.protocol('WM_DELETE_WINDOW', self.on_window_close)
 
         self._configure_styles()
         self._apply_window_icon(self.root)
@@ -954,38 +1080,67 @@ class VisualPdfSignerApp:
         style.configure("TLabel", font=f_normal)
         style.configure("TButton", font=f_normal)
         style.configure("Header.TLabel", font=get_sys_font(14, "bold"), foreground="#1E40AF")
-        style.configure("Toolbar.TFrame", background="#E2E8F0")
+        style.configure("Toolbar.TFrame", background="#F1F5F9")
 
-        # 3D Push Button Styles
-        style.configure("Primary3D.TButton", font=get_sys_font(10, "bold"), background="#059669", foreground="#FFFFFF")
+        # 3D Push Button Styles with Directional Lighting & Light Shadow Emulation
+        style.configure("Primary3D.TButton", font=get_sys_font(10, "bold"),
+            background="#059669", foreground="#FFFFFF", borderwidth=1, focuscolor="none",
+            lightcolor="#34D399", darkcolor="#047857"
+        )
         style.map("Primary3D.TButton",
             background=[("pressed", "#047857"), ("active", "#10B981")],
-            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")]
+            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")],
+            lightcolor=[("pressed", "#047857"), ("active", "#6EE7B7")],
+            darkcolor=[("pressed", "#34D399"), ("active", "#065F46")]
         )
 
-        style.configure("Tool3D.TButton", font=f_bold, background="#F1F5F9", foreground="#1E293B")
+        style.configure("Tool3D.TButton", font=f_bold,
+            background="#FFFFFF", foreground="#1E293B", borderwidth=1, focuscolor="none",
+            lightcolor="#FFFFFF", darkcolor="#CBD5E1"
+        )
         style.map("Tool3D.TButton",
-            background=[("pressed", "#CBD5E1"), ("active", "#E2E8F0")]
+            background=[("pressed", "#E2E8F0"), ("active", "#F8FAFC")],
+            lightcolor=[("pressed", "#CBD5E1"), ("active", "#FFFFFF")],
+            darkcolor=[("pressed", "#FFFFFF"), ("active", "#94A3B8")]
         )
 
-        style.configure("Batch.TButton", font=f_bold, background="#2563EB", foreground="#FFFFFF")
+        style.configure("Batch.TButton", font=f_bold,
+            background="#2563EB", foreground="#FFFFFF", borderwidth=1, focuscolor="none",
+            lightcolor="#60A5FA", darkcolor="#1D4ED8"
+        )
         style.map("Batch.TButton",
             background=[("pressed", "#1D4ED8"), ("active", "#3B82F6")],
-            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")]
+            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")],
+            lightcolor=[("pressed", "#1D4ED8"), ("active", "#93C5FD")],
+            darkcolor=[("pressed", "#60A5FA"), ("active", "#1E3A8A")]
         )
 
-        style.configure("Draw3D.TButton", font=f_bold, background="#D97706", foreground="#FFFFFF")
+        style.configure("Draw3D.TButton", font=f_bold,
+            background="#D97706", foreground="#FFFFFF", borderwidth=1, focuscolor="none",
+            lightcolor="#FBBF24", darkcolor="#B45309"
+        )
         style.map("Draw3D.TButton",
             background=[("pressed", "#B45309"), ("active", "#F59E0B")],
-            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")]
+            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")],
+            lightcolor=[("pressed", "#B45309"), ("active", "#FDE68A")],
+            darkcolor=[("pressed", "#FBBF24"), ("active", "#92400E")]
         )
 
-    def _create_3d_card(self, parent, bg="#FFFFFF", shadow_color="#93C5FD", pady=(0, 4)):
+    def _create_3d_card(self, parent, bg="#FFFFFF", shadow_color="#CBD5E1", highlight_color="#FFFFFF", pady=(0, 6)):
+        """
+        Creates an illuminated 3D card with dual-layer physical lighting:
+        - Outer light shadow (#CBD5E1) creates floating ambient elevation
+        - Top/left specular highlight (#FFFFFF) simulates directional lighting reflection
+        - Inner raised card face creates true tactile 3D depth
+        """
         shadow = tk.Frame(parent, bg=shadow_color, bd=0)
         shadow.pack(fill=tk.X, pady=pady)
-        card = tk.Frame(shadow, bg=bg, relief=tk.RAISED, bd=1, padx=8, pady=5)
-        card.pack(fill=tk.BOTH, expand=True, padx=(0, 2), pady=(0, 2))
+        bevel = tk.Frame(shadow, bg=highlight_color, bd=0)
+        bevel.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
+        card = tk.Frame(bevel, bg=bg, relief=tk.RAISED, bd=1, padx=9, pady=6)
+        card.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
         card.shadow = shadow
+        card.bevel = bevel
         return card
 
     def _maximize_window(self, window):
@@ -1024,13 +1179,42 @@ class VisualPdfSignerApp:
             logger.warning(f"Could not load window icon: {e}")
 
     def hide_window(self):
-        self.root.withdraw()
+        try:
+            self.root.withdraw()
+        except Exception as e:
+            logger.error(f"Error hiding window: {e}")
 
     def show_window(self):
-        self.root.deiconify()
-        self._maximize_window(self.root)
-        self.root.lift()
-        self.root.focus_force()
+        try:
+            self.root.deiconify()
+            self._maximize_window(self.root)
+            self.root.lift()
+            self.root.focus_force()
+            if CURRENT_OS == 'Windows':
+                self.root.attributes('-topmost', True)
+                self.root.update_idletasks()
+                self.root.attributes('-topmost', False)
+                try:
+                    hwnd = self.root.winfo_id()
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Error showing window: {e}")
+
+    def on_window_close(self):
+        """Minimizes window to background system tray when 'X' is clicked."""
+        self.hide_window()
+        global tray_icon
+        if tray_icon:
+            try:
+                tray_icon.notify(
+                    "A B INFOTECH Signer is running in the background.\nClick tray icon or desktop shortcut to open.",
+                    "Minimized to System Tray"
+                )
+            except Exception:
+                pass
 
     def _show_activation_screen(self):
         self.act_win = tk.Toplevel(self.root)
@@ -1155,60 +1339,73 @@ class VisualPdfSignerApp:
         self._show_activation_screen()
 
     def _init_app_interface(self):
-        self.root.deiconify()
-        self._maximize_window(self.root)
+        is_bg = any(arg.lower() in ['--background', '--tray', '--minimized', '--autostart', '-b'] for arg in sys.argv[1:])
+        if not is_bg:
+            self.root.deiconify()
+            self._maximize_window(self.root)
+        else:
+            self.hide_window()
+
         self._build_ui()
         if self.just_activated: self.just_activated = False
         else: self._run_startup_sync()
 
     def _build_ui(self):
-        # Left Control Panel
-        left_panel = tk.Frame(self.root, width=390, bg="#EBF1F6", relief=tk.GROOVE, bd=1)
+        # Left Control Panel (Illuminated 3D Pearl Slate)
+        left_panel = tk.Frame(self.root, width=400, bg="#F0F4F8", relief=tk.GROOVE, bd=1)
         left_panel.pack(side=tk.LEFT, fill=tk.Y)
         left_panel.pack_propagate(False)
 
         # Bottom Frame (Sign Buttons & Status)
-        bottom_frame = tk.Frame(left_panel, bg="#EBF1F6", padx=12, pady=8)
+        bottom_frame = tk.Frame(left_panel, bg="#F0F4F8", padx=12, pady=10)
         bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.lbl_status = tk.Label(
-            bottom_frame, text=f"Ready [{CURRENT_OS}]", foreground="#059669", bg="#EBF1F6",
+            bottom_frame, text=f"Ready [{CURRENT_OS}]", foreground="#047857", bg="#F0F4F8",
             wraplength=360, font=get_sys_font(9, "bold")
         )
-        self.lbl_status.pack(pady=(0, 4))
+        self.lbl_status.pack(pady=(0, 5))
 
-        sign_shadow = tk.Frame(bottom_frame, bg="#065F46", bd=0)
-        sign_shadow.pack(fill=tk.X, pady=(0, 4))
+        # Sign Button with 3D Specular Highlight & Soft Ambient Shadow
+        sign_shadow = tk.Frame(bottom_frame, bg="#CBD5E1", bd=0)
+        sign_shadow.pack(fill=tk.X, pady=(0, 5))
+        sign_light_rim = tk.Frame(sign_shadow, bg="#34D399", bd=0)
+        sign_light_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
         self.btn_sign = ttk.Button(
-            sign_shadow, text="✍️ SIGN & SAVE LOCAL DOCUMENT",
+            sign_light_rim, text="✍️ SIGN & SAVE LOCAL DOCUMENT",
             command=self.start_signing, style="Primary3D.TButton"
         )
-        self.btn_sign.pack(fill=tk.X, padx=(0, 2), pady=(0, 2), ipady=5)
+        self.btn_sign.pack(fill=tk.X, padx=(0, 1), pady=(0, 1), ipady=5)
 
-        batch_shadow = tk.Frame(bottom_frame, bg="#1E3A8A", bd=0)
-        batch_shadow.pack(fill=tk.X, pady=(0, 4))
+        # Batch Button with 3D Specular Highlight & Soft Ambient Shadow
+        batch_shadow = tk.Frame(bottom_frame, bg="#CBD5E1", bd=0)
+        batch_shadow.pack(fill=tk.X, pady=(0, 5))
+        batch_light_rim = tk.Frame(batch_shadow, bg="#93C5FD", bd=0)
+        batch_light_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
         self.btn_batch = ttk.Button(
-            batch_shadow, text="📁 BATCH SIGN FOLDER (ALL PDFs)",
+            batch_light_rim, text="📁 BATCH SIGN FOLDER (ALL PDFs)",
             command=self.open_batch_dialog, style="Batch.TButton"
         )
-        self.btn_batch.pack(fill=tk.X, padx=(0, 2), pady=(0, 2))
+        self.btn_batch.pack(fill=tk.X, padx=(0, 1), pady=(0, 1), ipady=3)
 
         disclaimer_text = "Note: Adobe validation status depends on your certificate chain and system trusted roots."
         self.lbl_disclaimer = tk.Label(
-            bottom_frame, text=disclaimer_text, foreground="#EF4444", bg="#EBF1F6",
+            bottom_frame, text=disclaimer_text, foreground="#EF4444", bg="#F0F4F8",
             wraplength=360, font=get_sys_font(7, "italic"), justify="left"
         )
         self.lbl_disclaimer.pack(pady=(4, 0))
 
         # Top Frame (Cards)
-        top_frame = tk.Frame(left_panel, bg="#EBF1F6")
+        top_frame = tk.Frame(left_panel, bg="#F0F4F8")
         top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(8, 0))
 
-        # Brand Header Card
-        brand_shadow = tk.Frame(top_frame, bg="#1E3A8A", bd=0)
-        brand_shadow.pack(fill=tk.X, pady=(0, 6))
-        brand_card = tk.Frame(brand_shadow, bg="#1E40AF", relief=tk.RAISED, bd=2, padx=8, pady=6)
-        brand_card.pack(fill=tk.BOTH, expand=True, padx=(0, 2), pady=(0, 2))
+        # Brand Header Card with illuminated 3D metallic sapphire rim
+        brand_shadow = tk.Frame(top_frame, bg="#CBD5E1", bd=0)
+        brand_shadow.pack(fill=tk.X, pady=(0, 7))
+        brand_light_rim = tk.Frame(brand_shadow, bg="#60A5FA", bd=0)
+        brand_light_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
+        brand_card = tk.Frame(brand_light_rim, bg="#1E40AF", relief=tk.RAISED, bd=2, padx=10, pady=7)
+        brand_card.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
 
         try:
             target_logo = LicenseManager.LICENSE_FILE if os.path.exists(LicenseManager.LICENSE_FILE) else "app_icon.ico"
@@ -1229,7 +1426,7 @@ class VisualPdfSignerApp:
         tk.Label(brand_text_box, text="🛡️ Token & .P12/.PFX Certificate Engine", font=get_sys_font(7, "bold"), fg="#6EE7B7", bg="#1E40AF").pack(anchor=tk.W)
 
         # Mode Selector Card
-        card_mode = self._create_3d_card(top_frame, shadow_color="#93C5FD", pady=(0, 4))
+        card_mode = self._create_3d_card(top_frame, shadow_color="#CBD5E1", pady=(0, 5))
         tk.Label(card_mode, text="Certificate Source Mode:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         mode_row = tk.Frame(card_mode, bg="#FFFFFF")
         mode_row.pack(fill=tk.X, pady=(2, 2))
@@ -1249,10 +1446,10 @@ class VisualPdfSignerApp:
         rb_pfx.pack(side=tk.LEFT)
 
         # Token Cards Container
-        self.token_panel = tk.Frame(top_frame, bg="#EBF1F6")
+        self.token_panel = tk.Frame(top_frame, bg="#F0F4F8")
         self.token_panel.pack(fill=tk.X)
 
-        card1 = self._create_3d_card(self.token_panel, shadow_color="#93C5FD", pady=(0, 4))
+        card1 = self._create_3d_card(self.token_panel, shadow_color="#CBD5E1", pady=(0, 5))
         tk.Label(card1, text="1. Select Token Driver:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         driver_row = tk.Frame(card1, bg="#FFFFFF")
         driver_row.pack(fill=tk.X, pady=(2, 2))
@@ -1271,20 +1468,20 @@ class VisualPdfSignerApp:
             style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")
         ).pack(side=tk.LEFT)
 
-        card2 = self._create_3d_card(self.token_panel, shadow_color="#93C5FD", pady=(0, 4))
+        card2 = self._create_3d_card(self.token_panel, shadow_color="#CBD5E1", pady=(0, 5))
         tk.Label(card2, text="2. Select Token Certificate:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         self.cert_combo = ttk.Combobox(card2, state="readonly", font=get_sys_font(8))
         self.cert_combo.pack(fill=tk.X, pady=(2, 2))
 
-        card3 = self._create_3d_card(self.token_panel, shadow_color="#93C5FD", pady=(0, 4))
+        card3 = self._create_3d_card(self.token_panel, shadow_color="#CBD5E1", pady=(0, 5))
         tk.Label(card3, text="3. Hardware Token PIN:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         self.pin_var = tk.StringVar()
         ttk.Entry(card3, textvariable=self.pin_var, show="*").pack(fill=tk.X, pady=(2, 2))
 
         # PFX Cards Container
-        self.pfx_panel = tk.Frame(top_frame, bg="#EBF1F6")
+        self.pfx_panel = tk.Frame(top_frame, bg="#F0F4F8")
 
-        card_p1 = self._create_3d_card(self.pfx_panel, shadow_color="#93C5FD", pady=(0, 4))
+        card_p1 = self._create_3d_card(self.pfx_panel, shadow_color="#CBD5E1", pady=(0, 5))
         tk.Label(card_p1, text="1. Select .P12 / .PFX File:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         pfx_file_row = tk.Frame(card_p1, bg="#FFFFFF")
         pfx_file_row.pack(fill=tk.X, pady=(2, 2))
@@ -1292,7 +1489,7 @@ class VisualPdfSignerApp:
         self.pfx_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         ttk.Button(pfx_file_row, text="Browse...", style="Tool3D.TButton", command=self.browse_pfx_file).pack(side=tk.RIGHT)
 
-        card_p2 = self._create_3d_card(self.pfx_panel, shadow_color="#93C5FD", pady=(0, 4))
+        card_p2 = self._create_3d_card(self.pfx_panel, shadow_color="#CBD5E1", pady=(0, 5))
         tk.Label(card_p2, text="2. Certificate Password:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         pfx_pass_row = tk.Frame(card_p2, bg="#FFFFFF")
         pfx_pass_row.pack(fill=tk.X, pady=(2, 2))
@@ -1300,7 +1497,7 @@ class VisualPdfSignerApp:
         self.pfx_pass_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         ttk.Button(pfx_pass_row, text="Verify", style="Tool3D.TButton", command=lambda: self.verify_pfx_certificate(silent=False)).pack(side=tk.RIGHT)
 
-        card_p3 = self._create_3d_card(self.pfx_panel, shadow_color="#93C5FD", pady=(0, 4))
+        card_p3 = self._create_3d_card(self.pfx_panel, shadow_color="#CBD5E1", pady=(0, 5))
         tk.Label(card_p3, text="3. Certificate Status:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
         self.lbl_pfx_details = tk.Label(
             card_p3, text="Select .p12/.pfx file & enter password to unlock.",
@@ -1310,7 +1507,7 @@ class VisualPdfSignerApp:
         self.lbl_pfx_details.pack(fill=tk.X, pady=(2, 2))
 
         # Card 4: Signature Area & Checkbox (Prominent in Side Panel)
-        card4 = self._create_3d_card(top_frame, shadow_color="#93C5FD", pady=(0, 4))
+        card4 = self._create_3d_card(top_frame, shadow_color="#CBD5E1", pady=(0, 5))
         self.card4_shadow = card4.shadow
 
         card4_header = tk.Frame(card4, bg="#FFFFFF")
@@ -1339,12 +1536,14 @@ class VisualPdfSignerApp:
         # Set initial visibility based on default mode
         self._on_cert_source_changed()
 
-        # Right Panel (PDF Viewport)
+        # Right Panel (PDF Viewport with 3D recessed frame)
         right_panel = tk.Frame(self.root, bg="#CBD5E1")
         right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        toolbar = ttk.Frame(right_panel, padding="6", style="Toolbar.TFrame")
-        toolbar.pack(fill=tk.X)
+        toolbar_shadow = tk.Frame(right_panel, bg="#CBD5E1", bd=0)
+        toolbar_shadow.pack(fill=tk.X)
+        toolbar = ttk.Frame(toolbar_shadow, padding="6", style="Toolbar.TFrame")
+        toolbar.pack(fill=tk.BOTH, expand=True, padx=(0, 0), pady=(0, 1))
 
         ttk.Button(toolbar, text="📂 Open PDF", style="Tool3D.TButton", command=self.open_pdf).pack(side=tk.LEFT, padx=3)
         self.btn_clear_pdf = ttk.Button(toolbar, text="🗑️ Clear PDF", style="Tool3D.TButton", command=self.clear_pdf, state=tk.DISABLED)
@@ -1352,7 +1551,7 @@ class VisualPdfSignerApp:
 
         self.btn_prev = ttk.Button(toolbar, text="◀ Prev", style="Tool3D.TButton", command=self.prev_page, state=tk.DISABLED)
         self.btn_prev.pack(side=tk.LEFT, padx=3)
-        self.lbl_page = tk.Label(toolbar, text="Page 0 / 0", font=get_sys_font(9, "bold"), bg="#F1F5F9", fg="#1E3A8A", relief=tk.SUNKEN, bd=1, padx=8, pady=3)
+        self.lbl_page = tk.Label(toolbar, text="Page 0 / 0", font=get_sys_font(9, "bold"), bg="#F8FAFC", fg="#1E3A8A", relief=tk.SUNKEN, bd=1, padx=8, pady=3)
         self.lbl_page.pack(side=tk.LEFT, padx=6)
         self.btn_next = ttk.Button(toolbar, text="Next ▶", style="Tool3D.TButton", command=self.next_page, state=tk.DISABLED)
         self.btn_next.pack(side=tk.LEFT, padx=3)
@@ -1379,8 +1578,12 @@ class VisualPdfSignerApp:
             command=lambda: self.exit_bulk_mode(confirm=True)
         ).pack(side=tk.RIGHT, padx=4)
 
-        self.canvas_frame = tk.Frame(right_panel, bg="#CBD5E1", relief=tk.SUNKEN, bd=2)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        # 3D Recessed Drafting Table Viewport
+        viewport_outer = tk.Frame(right_panel, bg="#94A3B8", bd=0)
+        viewport_outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        self.canvas_frame = tk.Frame(viewport_outer, bg="#CBD5E1", relief=tk.SUNKEN, bd=2)
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
 
         self.canvas_vscroll = ttk.Scrollbar(self.canvas_frame, orient=tk.VERTICAL)
         self.canvas_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1619,8 +1822,13 @@ class VisualPdfSignerApp:
         self.tk_img = ImageTk.PhotoImage(Image.frombytes("RGB", [pix.width, pix.height], pix.samples))
 
         self.canvas.delete("all")
+        # Soft ambient 3D page drop shadow (simulates elevated physical document)
+        self.canvas.create_rectangle(
+            6, 6, pix.width + 6, pix.height + 6,
+            fill="#64748B", outline=""
+        )
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_img)
-        self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
+        self.canvas.config(scrollregion=(0, 0, pix.width + 12, pix.height + 12))
 
         for idx, area in enumerate(self.signature_areas):
             if self.bulk_mode or area['page'] == self.current_page:
@@ -2328,6 +2536,8 @@ class SettingsDialog:
         self._build_ui()
         if initial_tab == "drivers":
             self.notebook.select(self.tab_drivers)
+        elif initial_tab == "startup":
+            self.notebook.select(self.tab_startup)
 
     def _build_ui(self):
         root_f = ttk.Frame(self.dialog, padding="12")
@@ -2351,6 +2561,11 @@ class SettingsDialog:
         self.tab_drivers = ttk.Frame(self.notebook, padding="12")
         self.notebook.add(self.tab_drivers, text="🔌 Token Drivers (.dll / .dylib / .so)")
         self._build_drivers_tab(self.tab_drivers)
+
+        # Tab 3: Background & Windows Startup
+        self.tab_startup = ttk.Frame(self.notebook, padding="12")
+        self.notebook.add(self.tab_startup, text="🚀 Background & Startup")
+        self._build_startup_tab(self.tab_startup)
 
         # Bottom Close Button
         btn_row = ttk.Frame(root_f)
@@ -2564,6 +2779,107 @@ class SettingsDialog:
         for name, path in self.custom_drivers.items():
             self.tree.insert("", tk.END, values=(name, path))
 
+    def _build_startup_tab(self, parent):
+        # Card 1: Windows Autostart on Boot (Silent Background / System Tray)
+        card_start = tk.Frame(parent, bg="#CBD5E1", bd=0)
+        card_start.pack(fill=tk.X, pady=(0, 10))
+        card_start_rim = tk.Frame(card_start, bg="#FFFFFF", bd=0)
+        card_start_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
+        inner_start = tk.Frame(card_start_rim, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        inner_start.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
+
+        tk.Label(
+            inner_start, text="🚀 Windows System Autostart",
+            font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF"
+        ).pack(anchor=tk.W)
+
+        tk.Label(
+            inner_start,
+            text="Launch A B INFOTECH Signer automatically when Windows starts. In background mode, no window is shown on startup; the app sits quietly in the system tray ready for instant signing and Web API requests.",
+            font=get_sys_font(8), fg="#475569", bg="#FFFFFF", wraplength=590, justify="left"
+        ).pack(anchor=tk.W, pady=(4, 8))
+
+        is_enabled = is_autostart_enabled()
+        self.autostart_var = tk.BooleanVar(value=is_enabled)
+
+        toggle_frame = tk.Frame(inner_start, bg="#FFFFFF")
+        toggle_frame.pack(fill=tk.X, pady=(2, 6))
+
+        status_text = "🟢 Windows Autostart is ENABLED (Silent background mode)" if is_enabled else "⚪ Windows Autostart is DISABLED"
+        status_fg = "#047857" if is_enabled else "#64748B"
+        lbl_status = tk.Label(inner_start, text=status_text, font=get_sys_font(8, "bold"), fg=status_fg, bg="#FFFFFF")
+
+        def _on_toggle():
+            val = self.autostart_var.get()
+            ok = set_autostart(val)
+            if ok:
+                if val:
+                    lbl_status.config(text="🟢 Windows Autostart is ENABLED (Silent background mode)", fg="#047857")
+                    messagebox.showinfo("Autostart Enabled", "A B INFOTECH Signer will now automatically start in the background when your computer boots.\nIt will remain in the System Tray ready for use.", parent=self.dialog)
+                else:
+                    lbl_status.config(text="⚪ Windows Autostart is DISABLED", fg="#64748B")
+                    messagebox.showinfo("Autostart Disabled", "Automatic startup has been disabled.", parent=self.dialog)
+            else:
+                self.autostart_var.set(not val)
+                messagebox.showerror("Error", "Could not modify Windows Registry for autostart.", parent=self.dialog)
+
+        chk = tk.Checkbutton(
+            toggle_frame,
+            text="Start silently in background with Windows (System Tray mode)",
+            variable=self.autostart_var,
+            command=_on_toggle,
+            bg="#FFFFFF", fg="#1E3A8A", font=get_sys_font(9, "bold"),
+            selectcolor="#DBEAFE", bd=0, activebackground="#FFFFFF"
+        )
+        chk.pack(side=tk.LEFT)
+        lbl_status.pack(anchor=tk.W, pady=(2, 0))
+
+        # Card 2: Single-Instance & Desktop / Taskbar Launch Behavior
+        card_single = tk.Frame(parent, bg="#CBD5E1", bd=0)
+        card_single.pack(fill=tk.X, pady=(0, 10))
+        card_single_rim = tk.Frame(card_single, bg="#FFFFFF", bd=0)
+        card_single_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
+        inner_single = tk.Frame(card_single_rim, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        inner_single.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
+
+        tk.Label(
+            inner_single, text="🛡️ Single-Instance & Desktop Icon Protection",
+            font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF"
+        ).pack(anchor=tk.W)
+
+        bullet_text = (
+            "• Single App Enforcement: When you click the Desktop icon or Taskbar shortcut, the system checks if the app is already running.\n"
+            "• Bring to Front: If already running in the background, it instantly restores, unhides, maximizes, and brings the existing window to the front.\n"
+            "• Zero Conflicts: No duplicate processes or token driver lockouts can occur; all tasks remain synchronized in your single active session."
+        )
+        tk.Label(
+            inner_single, text=bullet_text,
+            font=get_sys_font(8), fg="#334155", bg="#FFFFFF", justify="left"
+        ).pack(anchor=tk.W, pady=(4, 6))
+
+        # Card 3: System Tray & Window Close Behavior
+        card_tray = tk.Frame(parent, bg="#CBD5E1", bd=0)
+        card_tray.pack(fill=tk.X)
+        card_tray_rim = tk.Frame(card_tray, bg="#FFFFFF", bd=0)
+        card_tray_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
+        inner_tray = tk.Frame(card_tray_rim, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        inner_tray.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
+
+        tk.Label(
+            inner_tray, text="💡 Window Close & System Tray Behavior",
+            font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF"
+        ).pack(anchor=tk.W)
+
+        tray_info = (
+            "• Clicking 'X' (Close) minimizes the application directly to the Windows System Tray.\n"
+            "• The Web API Bridge (port 5000) and token background service continue running seamlessly.\n"
+            "• To exit the application completely, right-click the system tray icon and choose '❌ Quit Entirely'."
+        )
+        tk.Label(
+            inner_tray, text=tray_info,
+            font=get_sys_font(8), fg="#334155", bg="#FFFFFF", justify="left"
+        ).pack(anchor=tk.W, pady=(4, 6))
+
 # ==========================================
 # 5. SYSTEM TRAY & BACKGROUND THREAD LOGIC
 # ==========================================
@@ -2620,9 +2936,27 @@ def load_icon():
 def on_open_app(icon, item):
     gui_root.after(0, gui_app.show_window)
 
+def on_quick_sign(icon, item):
+    def _do():
+        gui_app.show_window()
+        gui_app.open_pdf()
+    gui_root.after(0, _do)
+
+def on_bulk_sign(icon, item):
+    def _do():
+        gui_app.show_window()
+        gui_app.open_batch_dialog()
+    gui_root.after(0, _do)
+
+def on_settings_dialog(icon, item):
+    def _do():
+        gui_app.show_window()
+        gui_app.open_settings_dialog(initial_tab="startup")
+    gui_root.after(0, _do)
+
 def on_start_clicked(icon, item):
     start_flask_server()
-    try: icon.notify("Web API Bridge Started.", "A B INFOTECH")
+    try: icon.notify("Web API Bridge Started on port 5000.", "A B INFOTECH")
     except Exception: pass
 
 def on_stop_clicked(icon, item):
@@ -2638,12 +2972,16 @@ def on_quit_clicked(icon, item):
 def setup_tray():
     global tray_icon
     menu = pystray.Menu(
-        item('Open Local Application', on_open_app, default=True),
+        item('📂 Open Application (Bring to Front)', on_open_app, default=True),
         pystray.Menu.SEPARATOR,
-        item('Start Web Bridge', on_start_clicked),
-        item('Stop Web Bridge', on_stop_clicked),
+        item('✍️ Quick Sign Single PDF...', on_quick_sign),
+        item('📁 Bulk Sign Folder...', on_bulk_sign),
+        item('⚙️ Settings & Startup', on_settings_dialog),
         pystray.Menu.SEPARATOR,
-        item('Quit Entirely', on_quit_clicked)
+        item('🌐 Start Web Bridge', on_start_clicked),
+        item('🛑 Stop Web Bridge', on_stop_clicked),
+        pystray.Menu.SEPARATOR,
+        item('❌ Quit Entirely', on_quit_clicked)
     )
     tray_icon = pystray.Icon("PDF_Signer", load_icon(), f"A B INFOTECH Signer [{CURRENT_OS}]", menu)
     threading.Thread(target=tray_icon.run, daemon=True).start()
@@ -2652,10 +2990,32 @@ def setup_tray():
 # 6. APPLICATION ENTRY POINT
 # ==========================================
 if __name__ == '__main__':
+    # Detect background startup arguments
+    is_background = any(arg.lower() in ['--background', '--tray', '--minimized', '--autostart', '-b'] for arg in sys.argv[1:])
+
+    # Single-Instance Enforcement:
+    # If another instance is running:
+    # - If launched by user (desktop / taskbar), wake_up=True brings the existing window to front!
+    # - If background autostart, wake_up=False keeps it running silently.
+    # Secondary process terminates immediately (sys.exit(0)).
+    if check_single_instance_and_bring_to_front(wake_up=(not is_background)):
+        logger.info("Existing instance detected and requested to front. Exiting duplicate process.")
+        sys.exit(0)
+
+    # Start Flask Web Bridge server
     start_flask_server()
 
+    # Initialize Tkinter GUI
     gui_root = tk.Tk()
     gui_app = VisualPdfSignerApp(gui_root)
+
+    # Initialize System Tray
     setup_tray()
-    gui_root.after(200, gui_app.show_window)
+
+    if is_background:
+        gui_app.hide_window()
+        logger.info("A B INFOTECH Signer started silently in background / system tray.")
+    else:
+        gui_root.after(150, gui_app.show_window)
+
     gui_root.mainloop()
