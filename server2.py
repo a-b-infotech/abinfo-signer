@@ -1392,29 +1392,81 @@ class VisualPdfSignerApp:
 
         # Brand Header Card with illuminated 3D metallic sapphire rim
         brand_shadow = tk.Frame(top_frame, bg="#CBD5E1", bd=0)
-        brand_shadow.pack(fill=tk.X, pady=(0, 7))
-        brand_light_rim = tk.Frame(brand_shadow, bg="#60A5FA", bd=0)
+        brand_shadow.pack(fill=tk.X, pady=(0, 8))
+        # Top-specular directional lighting rim (Electric Sky / Cyan highlight)
+        brand_light_rim = tk.Frame(brand_shadow, bg="#38BDF8", bd=0)
         brand_light_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        brand_card = tk.Frame(brand_light_rim, bg="#1E40AF", relief=tk.RAISED, bd=2, padx=10, pady=7)
+        # Deep Rich Sapphire Blue Card Face
+        brand_card = tk.Frame(brand_light_rim, bg="#1E3A8A", relief=tk.RAISED, bd=2, padx=10, pady=8)
         brand_card.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
 
+        # 3D Raised White Logo Podium / Badge (ensures 100% contrast & sharpness for black & red details)
+        logo_badge_shadow = tk.Frame(brand_card, bg="#0F172A", bd=0)
+        logo_badge_shadow.pack(side=tk.LEFT, padx=(0, 10))
+        logo_badge_rim = tk.Frame(logo_badge_shadow, bg="#93C5FD", bd=0)
+        logo_badge_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
+        logo_badge = tk.Frame(logo_badge_rim, bg="#FFFFFF", relief=tk.RAISED, bd=2, padx=4, pady=3)
+        logo_badge.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
+
         try:
-            target_logo = LicenseManager.LICENSE_FILE if os.path.exists(LicenseManager.LICENSE_FILE) else "app_icon.ico"
-            if os.path.exists(target_logo):
+            # Check high-res master logo first, then fallbacks
+            logo_candidates = [
+                "image_546aa0.png",
+                LicenseManager.LICENSE_FILE,
+                "app_icon.png",
+                "app_icon.ico",
+                "icon.ico"
+            ]
+            target_logo = None
+            for cand in logo_candidates:
+                if cand and os.path.exists(cand):
+                    target_logo = cand
+                    break
+
+            if target_logo:
                 logo_pil = Image.open(target_logo)
             else:
-                logo_pil = Image.new('RGB', (80, 80), color=(0, 120, 215))
-            logo_pil.thumbnail((55, 55), Image.Resampling.LANCZOS)
-            self.tk_logo = ImageTk.PhotoImage(logo_pil)
-            tk.Label(brand_card, image=self.tk_logo, bg="#1E40AF").pack(side=tk.LEFT, padx=(0, 8))
-        except Exception:
-            tk.Label(brand_card, text="[ABI]", fg="white", bg="#1E40AF", font=get_sys_font(12, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+                logo_pil = Image.new('RGB', (100, 100), color=(255, 255, 255))
 
-        brand_text_box = tk.Frame(brand_card, bg="#1E40AF")
+            # Composite with pure white background for flawless anti-aliasing without dark fringes
+            if logo_pil.mode in ('RGBA', 'LA') or (logo_pil.mode == 'P' and 'transparency' in logo_pil.info):
+                if logo_pil.mode != 'RGBA':
+                    logo_pil = logo_pil.convert('RGBA')
+                white_bg = Image.new('RGB', logo_pil.size, (255, 255, 255))
+                white_bg.paste(logo_pil, mask=logo_pil.split()[3])
+                logo_pil = white_bg
+            else:
+                logo_pil = logo_pil.convert('RGB')
+
+            # Render big and proper (86x78)
+            logo_pil.thumbnail((86, 86), Image.Resampling.LANCZOS)
+            self.tk_logo = ImageTk.PhotoImage(logo_pil)
+            tk.Label(logo_badge, image=self.tk_logo, bg="#FFFFFF").pack()
+        except Exception as e:
+            logger.warning(f"Error loading header logo: {e}")
+            tk.Label(logo_badge, text="[ABI]", fg="#1E3A8A", bg="#FFFFFF", font=get_sys_font(12, "bold")).pack(padx=8, pady=8)
+
+        brand_text_box = tk.Frame(brand_card, bg="#1E3A8A")
         brand_text_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tk.Label(brand_text_box, text="A B INFOTECH", font=get_sys_font(14, "bold"), fg="#FFFFFF", bg="#1E40AF").pack(anchor=tk.W)
-        tk.Label(brand_text_box, text=f"OFFLINE DIGITAL SIGNER v1.1 [{CURRENT_OS}]", font=get_sys_font(7, "bold"), fg="#93C5FD", bg="#1E40AF").pack(anchor=tk.W)
-        tk.Label(brand_text_box, text="🛡️ Token & .P12/.PFX Certificate Engine", font=get_sys_font(7, "bold"), fg="#6EE7B7", bg="#1E40AF").pack(anchor=tk.W)
+
+        tk.Label(
+            brand_text_box, text="A B INFOTECH",
+            font=get_sys_font(16, "bold"), fg="#FFFFFF", bg="#1E3A8A"
+        ).pack(anchor=tk.W)
+
+        sub_badge = tk.Frame(brand_text_box, bg="#1E40AF", relief=tk.SOLID, bd=1, padx=6, pady=2)
+        sub_badge.pack(anchor=tk.W, pady=(2, 3))
+        tk.Label(
+            sub_badge, text=f"OFFLINE DIGITAL SIGNER v1.1 [{CURRENT_OS}]",
+            font=get_sys_font(7, "bold"), fg="#BFDBFE", bg="#1E40AF"
+        ).pack(anchor=tk.W)
+
+        tag_badge = tk.Frame(brand_text_box, bg="#064E3B", relief=tk.SOLID, bd=1, padx=6, pady=2)
+        tag_badge.pack(anchor=tk.W)
+        tk.Label(
+            tag_badge, text="🛡️ Token & .P12/.PFX Certificate Engine",
+            font=get_sys_font(7, "bold"), fg="#6EE7B7", bg="#064E3B"
+        ).pack(anchor=tk.W)
 
         # Mode Selector Card
         card_mode = self._create_3d_card(top_frame, shadow_color="#CBD5E1", pady=(0, 5))
@@ -2803,12 +2855,13 @@ def stop_flask_server():
         logger.error(f"Error stopping server: {e}")
 
 def load_icon():
-    if os.path.exists(LicenseManager.LICENSE_FILE):
-        try: return Image.open(LicenseManager.LICENSE_FILE)
-        except Exception: pass
+    for f in ["image_546aa0.png", LicenseManager.LICENSE_FILE, "app_icon.png", "app_icon.ico", "icon.ico"]:
+        if f and os.path.exists(f):
+            try: return Image.open(f)
+            except Exception: pass
 
     if hasattr(sys, '_MEIPASS'):
-        for icon_name in ['app_icon.ico', 'app_icon.png', 'app_icon.icns']:
+        for icon_name in ['image_546aa0.png', 'app_icon.ico', 'app_icon.png', 'app_icon.icns']:
             fallback = os.path.join(sys._MEIPASS, icon_name)
             if os.path.exists(fallback):
                 try: return Image.open(fallback)
