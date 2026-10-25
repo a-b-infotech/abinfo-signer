@@ -525,7 +525,7 @@ def api_show_window():
 # 1.8. AUTOSTART & SINGLE-INSTANCE LOGIC
 # ==========================================
 AUTOSTART_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-AUTOSTART_APP_NAME = "ABInfoSigner"
+AUTOSTART_APP_NAME = "Abinfo_Signer_Offline"
 
 def get_app_launch_command(background=True):
     flag = " --background" if background else ""
@@ -541,36 +541,106 @@ def get_app_launch_command(background=True):
         return f'"{runner}" "{script_path}"{flag}'
 
 def is_autostart_enabled():
-    if CURRENT_OS != 'Windows':
-        return False
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_READ) as key:
-            val, _ = winreg.QueryValueEx(key, AUTOSTART_APP_NAME)
-            return bool(val)
-    except Exception:
-        return False
+    if CURRENT_OS == 'Windows':
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_READ) as key:
+                val, _ = winreg.QueryValueEx(key, AUTOSTART_APP_NAME)
+                return bool(val and "--background" in val)
+        except Exception:
+            return False
+    elif CURRENT_OS == 'Linux':
+        desktop_file = os.path.expanduser("~/.config/autostart/abinfo_signer.desktop")
+        return os.path.exists(desktop_file)
+    elif CURRENT_OS == 'Darwin':
+        plist_file = os.path.expanduser("~/Library/LaunchAgents/com.abinfotech.signer.plist")
+        return os.path.exists(plist_file)
+    return False
 
 def set_autostart(enable: bool):
-    if CURRENT_OS != 'Windows':
-        return False
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            if enable:
-                cmd = get_app_launch_command(background=True)
-                winreg.SetValueEx(key, AUTOSTART_APP_NAME, 0, winreg.REG_SZ, cmd)
-                logger.info(f"Windows Autostart enabled: {cmd}")
-            else:
-                try:
-                    winreg.DeleteValue(key, AUTOSTART_APP_NAME)
+    """Configures system autostart in silent background mode across Windows, Linux, and macOS."""
+    cmd = get_app_launch_command(background=True)
+    if CURRENT_OS == 'Windows':
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
+                if enable:
+                    winreg.SetValueEx(key, AUTOSTART_APP_NAME, 0, winreg.REG_SZ, cmd)
+                    for old_name in ["ABInfoSigner"]:
+                        try: winreg.DeleteValue(key, old_name)
+                        except FileNotFoundError: pass
+                    logger.info(f"Windows Autostart enabled (silent background): {cmd}")
+                else:
+                    for name in [AUTOSTART_APP_NAME, "ABInfoSigner"]:
+                        try: winreg.DeleteValue(key, name)
+                        except FileNotFoundError: pass
                     logger.info("Windows Autostart disabled.")
-                except FileNotFoundError:
-                    pass
-        return True
-    except Exception as e:
-        logger.error(f"Failed to set Windows autostart: {e}")
-        return False
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set Windows autostart: {e}")
+            return False
+
+    elif CURRENT_OS == 'Linux':
+        try:
+            autostart_dir = os.path.expanduser("~/.config/autostart")
+            os.makedirs(autostart_dir, exist_ok=True)
+            desktop_file = os.path.join(autostart_dir, "abinfo_signer.desktop")
+            if enable:
+                content = f"""[Desktop Entry]
+Type=Application
+Exec={cmd}
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name=A B INFOTECH Signer
+Comment=Start A B INFOTECH Signer silently in background
+"""
+                with open(desktop_file, "w") as f:
+                    f.write(content)
+                logger.info(f"Linux Autostart enabled: {desktop_file}")
+            else:
+                if os.path.exists(desktop_file):
+                    os.remove(desktop_file)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set Linux autostart: {e}")
+            return False
+
+    elif CURRENT_OS == 'Darwin':
+        try:
+            agents_dir = os.path.expanduser("~/Library/LaunchAgents")
+            os.makedirs(agents_dir, exist_ok=True)
+            plist_file = os.path.join(agents_dir, "com.abinfotech.signer.plist")
+            if enable:
+                exe_part = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+                content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.abinfotech.signer</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe_part}</string>
+        <string>--background</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+"""
+                with open(plist_file, "w") as f:
+                    f.write(content)
+                logger.info(f"macOS Autostart enabled: {plist_file}")
+            else:
+                if os.path.exists(plist_file):
+                    os.remove(plist_file)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set macOS autostart: {e}")
+            return False
+
+    return False
 
 def check_single_instance_and_bring_to_front(wake_up=True):
     """
@@ -1301,6 +1371,12 @@ class VisualPdfSignerApp:
                 self.act_win.after(1000, self._wait_for_callback)
 
     def _run_startup_sync(self):
+        is_bg = any(arg.lower() in ['--background', '--tray', '--minimized', '--autostart', '-b'] for arg in sys.argv[1:])
+        if is_bg:
+            if LicenseManager.check_expiration_local() == "expired":
+                self._force_lock_ui()
+            return
+
         key = LicenseManager.get_license_key()
         if not key or key == "ABI-MASTER-PASS": return
         try:
@@ -2934,18 +3010,21 @@ if __name__ == '__main__':
         logger.info("Existing instance detected and requested to front. Exiting duplicate process.")
         sys.exit(0)
 
-    # Automatically set Windows autostart in background by default
-    if CURRENT_OS == 'Windows':
-        try:
-            set_autostart(True)
-        except Exception as e:
-            logger.warning(f"Default autostart setup note: {e}")
+    # Automatically register system autostart in silent background mode by default
+    try:
+        set_autostart(True)
+    except Exception as e:
+        logger.warning(f"Default autostart setup note: {e}")
 
     # Start Flask Web Bridge server
     start_flask_server()
 
     # Initialize Tkinter GUI
     gui_root = tk.Tk()
+    # CRITICAL: Withdraw window immediately if starting in background to prevent any flash on screen
+    if is_background:
+        gui_root.withdraw()
+
     gui_app = VisualPdfSignerApp(gui_root)
 
     # Initialize System Tray

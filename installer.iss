@@ -54,7 +54,7 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: 
 ; This makes your app start automatically in the background when Windows boots
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     ValueType: string; ValueName: "Abinfo_Signer_Offline"; \
-    ValueData: "{app}\{#MyAppExeName}"; Flags: uninsdeletevalue
+    ValueData: """{app}\{#MyAppExeName}"" --background"; Flags: uninsdeletevalue
 
 [Run]
 ; Auto-installs the certificate to the Windows Trusted Root store quietly
