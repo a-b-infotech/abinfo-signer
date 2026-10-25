@@ -1204,17 +1204,8 @@ class VisualPdfSignerApp:
             logger.error(f"Error showing window: {e}")
 
     def on_window_close(self):
-        """Minimizes window to background system tray when 'X' is clicked."""
+        """Minimizes window silently to background system tray when 'X' is clicked."""
         self.hide_window()
-        global tray_icon
-        if tray_icon:
-            try:
-                tray_icon.notify(
-                    "A B INFOTECH Signer is running in the background.\nClick tray icon or desktop shortcut to open.",
-                    "Minimized to System Tray"
-                )
-            except Exception:
-                pass
 
     def _show_activation_screen(self):
         self.act_win = tk.Toplevel(self.root)
@@ -2536,8 +2527,6 @@ class SettingsDialog:
         self._build_ui()
         if initial_tab == "drivers":
             self.notebook.select(self.tab_drivers)
-        elif initial_tab == "startup":
-            self.notebook.select(self.tab_startup)
 
     def _build_ui(self):
         root_f = ttk.Frame(self.dialog, padding="12")
@@ -2561,11 +2550,6 @@ class SettingsDialog:
         self.tab_drivers = ttk.Frame(self.notebook, padding="12")
         self.notebook.add(self.tab_drivers, text="🔌 Token Drivers (.dll / .dylib / .so)")
         self._build_drivers_tab(self.tab_drivers)
-
-        # Tab 3: Background & Windows Startup
-        self.tab_startup = ttk.Frame(self.notebook, padding="12")
-        self.notebook.add(self.tab_startup, text="🚀 Background & Startup")
-        self._build_startup_tab(self.tab_startup)
 
         # Bottom Close Button
         btn_row = ttk.Frame(root_f)
@@ -2779,107 +2763,6 @@ class SettingsDialog:
         for name, path in self.custom_drivers.items():
             self.tree.insert("", tk.END, values=(name, path))
 
-    def _build_startup_tab(self, parent):
-        # Card 1: Windows Autostart on Boot (Silent Background / System Tray)
-        card_start = tk.Frame(parent, bg="#CBD5E1", bd=0)
-        card_start.pack(fill=tk.X, pady=(0, 10))
-        card_start_rim = tk.Frame(card_start, bg="#FFFFFF", bd=0)
-        card_start_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        inner_start = tk.Frame(card_start_rim, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
-        inner_start.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
-
-        tk.Label(
-            inner_start, text="🚀 Windows System Autostart",
-            font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF"
-        ).pack(anchor=tk.W)
-
-        tk.Label(
-            inner_start,
-            text="Launch A B INFOTECH Signer automatically when Windows starts. In background mode, no window is shown on startup; the app sits quietly in the system tray ready for instant signing and Web API requests.",
-            font=get_sys_font(8), fg="#475569", bg="#FFFFFF", wraplength=590, justify="left"
-        ).pack(anchor=tk.W, pady=(4, 8))
-
-        is_enabled = is_autostart_enabled()
-        self.autostart_var = tk.BooleanVar(value=is_enabled)
-
-        toggle_frame = tk.Frame(inner_start, bg="#FFFFFF")
-        toggle_frame.pack(fill=tk.X, pady=(2, 6))
-
-        status_text = "🟢 Windows Autostart is ENABLED (Silent background mode)" if is_enabled else "⚪ Windows Autostart is DISABLED"
-        status_fg = "#047857" if is_enabled else "#64748B"
-        lbl_status = tk.Label(inner_start, text=status_text, font=get_sys_font(8, "bold"), fg=status_fg, bg="#FFFFFF")
-
-        def _on_toggle():
-            val = self.autostart_var.get()
-            ok = set_autostart(val)
-            if ok:
-                if val:
-                    lbl_status.config(text="🟢 Windows Autostart is ENABLED (Silent background mode)", fg="#047857")
-                    messagebox.showinfo("Autostart Enabled", "A B INFOTECH Signer will now automatically start in the background when your computer boots.\nIt will remain in the System Tray ready for use.", parent=self.dialog)
-                else:
-                    lbl_status.config(text="⚪ Windows Autostart is DISABLED", fg="#64748B")
-                    messagebox.showinfo("Autostart Disabled", "Automatic startup has been disabled.", parent=self.dialog)
-            else:
-                self.autostart_var.set(not val)
-                messagebox.showerror("Error", "Could not modify Windows Registry for autostart.", parent=self.dialog)
-
-        chk = tk.Checkbutton(
-            toggle_frame,
-            text="Start silently in background with Windows (System Tray mode)",
-            variable=self.autostart_var,
-            command=_on_toggle,
-            bg="#FFFFFF", fg="#1E3A8A", font=get_sys_font(9, "bold"),
-            selectcolor="#DBEAFE", bd=0, activebackground="#FFFFFF"
-        )
-        chk.pack(side=tk.LEFT)
-        lbl_status.pack(anchor=tk.W, pady=(2, 0))
-
-        # Card 2: Single-Instance & Desktop / Taskbar Launch Behavior
-        card_single = tk.Frame(parent, bg="#CBD5E1", bd=0)
-        card_single.pack(fill=tk.X, pady=(0, 10))
-        card_single_rim = tk.Frame(card_single, bg="#FFFFFF", bd=0)
-        card_single_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        inner_single = tk.Frame(card_single_rim, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
-        inner_single.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
-
-        tk.Label(
-            inner_single, text="🛡️ Single-Instance & Desktop Icon Protection",
-            font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF"
-        ).pack(anchor=tk.W)
-
-        bullet_text = (
-            "• Single App Enforcement: When you click the Desktop icon or Taskbar shortcut, the system checks if the app is already running.\n"
-            "• Bring to Front: If already running in the background, it instantly restores, unhides, maximizes, and brings the existing window to the front.\n"
-            "• Zero Conflicts: No duplicate processes or token driver lockouts can occur; all tasks remain synchronized in your single active session."
-        )
-        tk.Label(
-            inner_single, text=bullet_text,
-            font=get_sys_font(8), fg="#334155", bg="#FFFFFF", justify="left"
-        ).pack(anchor=tk.W, pady=(4, 6))
-
-        # Card 3: System Tray & Window Close Behavior
-        card_tray = tk.Frame(parent, bg="#CBD5E1", bd=0)
-        card_tray.pack(fill=tk.X)
-        card_tray_rim = tk.Frame(card_tray, bg="#FFFFFF", bd=0)
-        card_tray_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        inner_tray = tk.Frame(card_tray_rim, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
-        inner_tray.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
-
-        tk.Label(
-            inner_tray, text="💡 Window Close & System Tray Behavior",
-            font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#FFFFFF"
-        ).pack(anchor=tk.W)
-
-        tray_info = (
-            "• Clicking 'X' (Close) minimizes the application directly to the Windows System Tray.\n"
-            "• The Web API Bridge (port 5000) and token background service continue running seamlessly.\n"
-            "• To exit the application completely, right-click the system tray icon and choose '❌ Quit Entirely'."
-        )
-        tk.Label(
-            inner_tray, text=tray_info,
-            font=get_sys_font(8), fg="#334155", bg="#FFFFFF", justify="left"
-        ).pack(anchor=tk.W, pady=(4, 6))
-
 # ==========================================
 # 5. SYSTEM TRAY & BACKGROUND THREAD LOGIC
 # ==========================================
@@ -2951,18 +2834,14 @@ def on_bulk_sign(icon, item):
 def on_settings_dialog(icon, item):
     def _do():
         gui_app.show_window()
-        gui_app.open_settings_dialog(initial_tab="startup")
+        gui_app.open_settings_dialog()
     gui_root.after(0, _do)
 
 def on_start_clicked(icon, item):
     start_flask_server()
-    try: icon.notify("Web API Bridge Started on port 5000.", "A B INFOTECH")
-    except Exception: pass
 
 def on_stop_clicked(icon, item):
     stop_flask_server()
-    try: icon.notify("Web API Bridge Stopped.", "A B INFOTECH")
-    except Exception: pass
 
 def on_quit_clicked(icon, item):
     stop_flask_server()
@@ -2976,7 +2855,7 @@ def setup_tray():
         pystray.Menu.SEPARATOR,
         item('✍️ Quick Sign Single PDF...', on_quick_sign),
         item('📁 Bulk Sign Folder...', on_bulk_sign),
-        item('⚙️ Settings & Startup', on_settings_dialog),
+        item('⚙️ Settings & License', on_settings_dialog),
         pystray.Menu.SEPARATOR,
         item('🌐 Start Web Bridge', on_start_clicked),
         item('🛑 Stop Web Bridge', on_stop_clicked),
@@ -3001,6 +2880,13 @@ if __name__ == '__main__':
     if check_single_instance_and_bring_to_front(wake_up=(not is_background)):
         logger.info("Existing instance detected and requested to front. Exiting duplicate process.")
         sys.exit(0)
+
+    # Automatically set Windows autostart in background by default
+    if CURRENT_OS == 'Windows':
+        try:
+            set_autostart(True)
+        except Exception as e:
+            logger.warning(f"Default autostart setup note: {e}")
 
     # Start Flask Web Bridge server
     start_flask_server()
