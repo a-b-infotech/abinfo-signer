@@ -21,15 +21,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'browser_sync') {
     }
 
     try {
-        $stmt = $pdo->prepare("SELECT status, expiredate, license_tier, ocr_enabled, edit_enabled FROM license_keys WHERE license_key = :key LIMIT 1");
+        $stmt = $pdo->prepare("SELECT status, expiredate, license_tier FROM license_keys WHERE license_key = :key LIMIT 1");
         $stmt->bindParam(':key', $license_key);
         $stmt->execute();
 
         if ($stmt->rowCount() > 0) {
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $tier = !empty($row['license_tier']) ? $row['license_tier'] : 'pro';
-            $ocr = isset($row['ocr_enabled']) ? (int)$row['ocr_enabled'] : 1;
-            $edit = isset($row['edit_enabled']) ? (int)$row['edit_enabled'] : 1;
+            $tier = (!empty($row['license_tier']) && strtolower($row['license_tier']) === 'basic') ? 'basic' : 'pro';
             
             if ($row['status'] !== 'active') {
                 header("Location: http://127.0.0.1:5000/api/sync_callback?status=inactive");
@@ -37,7 +35,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'browser_sync') {
             elseif (!empty($row['expiredate']) && strtotime($row['expiredate']) < time()) {
                 header("Location: http://127.0.0.1:5000/api/sync_callback?status=expired");
             } else {
-                header("Location: http://127.0.0.1:5000/api/sync_callback?status=active&tier=" . urlencode($tier) . "&ocr=" . $ocr . "&edit=" . $edit);
+                header("Location: http://127.0.0.1:5000/api/sync_callback?status=active&tier=" . urlencode($tier));
             }
         } else {
             header("Location: http://127.0.0.1:5000/api/sync_callback?status=invalid");
@@ -59,37 +57,30 @@ if (isset($_GET['action']) && $_GET['action'] === 'verify_license') {
     if ($key === 'ABI-MASTER-PASS') {
         echo json_encode([
             'status' => 'active',
-            'tier' => 'enterprise',
-            'ocr_enabled' => 1,
-            'edit_enabled' => 1,
+            'tier' => 'pro',
             'expiredate' => 'never'
         ]);
         exit;
     }
 
     try {
-        $stmt = $pdo->prepare("SELECT status, expiredate, license_tier, ocr_enabled, edit_enabled FROM license_keys WHERE license_key = :key LIMIT 1");
+        $stmt = $pdo->prepare("SELECT status, expiredate, license_tier FROM license_keys WHERE license_key = :key LIMIT 1");
         $stmt->bindParam(':key', $key);
         $stmt->execute();
 
         if ($stmt->rowCount() > 0) {
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $tier = !empty($row['license_tier']) ? $row['license_tier'] : 'pro';
-            $ocr = isset($row['ocr_enabled']) ? (int)$row['ocr_enabled'] : 1;
-            $edit = isset($row['edit_enabled']) ? (int)$row['edit_enabled'] : 1;
+            $tier = (!empty($row['license_tier']) && strtolower($row['license_tier']) === 'basic') ? 'basic' : 'pro';
             
             if ($row['status'] !== 'active') {
                 echo json_encode(['status' => 'inactive']);
             } 
-            // Check Date AND Exact Time
             elseif (!empty($row['expiredate']) && strtotime($row['expiredate']) < time()) {
                 echo json_encode(['status' => 'expired']);
             } else {
                 echo json_encode([
                     'status' => 'active',
                     'tier' => $tier,
-                    'ocr_enabled' => $ocr,
-                    'edit_enabled' => $edit,
                     'expiredate' => !empty($row['expiredate']) ? $row['expiredate'] : 'never'
                 ]);
             }
@@ -113,7 +104,7 @@ if (empty($license_key)) {
 }
 
 try {
-    $query = "SELECT id, status, expiredate, license_tier, ocr_enabled, edit_enabled, activated_at FROM license_keys WHERE license_key = :key LIMIT 1";
+    $query = "SELECT id, status, expiredate, license_tier, activated_at FROM license_keys WHERE license_key = :key LIMIT 1";
     $stmt = $pdo->prepare($query);
     $stmt->bindParam(':key', $license_key);
     $stmt->execute();
@@ -139,13 +130,10 @@ try {
             $upd->execute([':id' => $row['id']]);
         }
 
-        // Prepare parameters to pass back to Python
         $exp_date = !empty($row['expiredate']) ? $row['expiredate'] : 'never';
-        $tier = !empty($row['license_tier']) ? $row['license_tier'] : 'pro';
-        $ocr = isset($row['ocr_enabled']) ? (int)$row['ocr_enabled'] : 1;
-        $edit = isset($row['edit_enabled']) ? (int)$row['edit_enabled'] : 1;
+        $tier = (!empty($row['license_tier']) && strtolower($row['license_tier']) === 'basic') ? 'basic' : 'pro';
 
-        header("Location: http://127.0.0.1:5000/api/activate_callback?status=valid&key=" . urlencode($license_key) . "&expiredate=" . urlencode($exp_date) . "&tier=" . urlencode($tier) . "&ocr=" . $ocr . "&edit=" . $edit);
+        header("Location: http://127.0.0.1:5000/api/activate_callback?status=valid&key=" . urlencode($license_key) . "&expiredate=" . urlencode($exp_date) . "&tier=" . urlencode($tier));
         exit;
     } else {
         header("Location: http://127.0.0.1:5000/api/activate_callback?status=invalid&message=" . urlencode("Invalid license key! Please contact +91 7016797720 or sales@a-b-infotech.in."));

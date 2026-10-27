@@ -42,7 +42,7 @@ if CURRENT_OS == 'Windows':
 
 # GUI & Visual Components
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, colorchooser
 
 # Prevent PyMuPDF layout/LLM modules from causing issues
 sys.modules['pymupdf4llm'] = None
@@ -184,9 +184,9 @@ class LicenseManager:
             return False
 
     @staticmethod
-    def save_license(key, expiredate="never", tier="pro", ocr_enabled=1, edit_enabled=1):
-        tier_clean = str(tier).lower().strip() if tier else "pro"
-        data_to_encode = f"{key}|||{expiredate}|||{tier_clean}|||{int(bool(int(ocr_enabled)))}|||{int(bool(int(edit_enabled)))}"
+    def save_license(key, expiredate="never", tier="pro", **kwargs):
+        tier_clean = "basic" if str(tier).lower().strip() == "basic" else "pro"
+        data_to_encode = f"{key}|||{expiredate}|||{tier_clean}"
         encoded_data = base64.b64encode(data_to_encode.encode())
 
         icon_binary = b""
@@ -224,9 +224,7 @@ class LicenseManager:
         default_info = {
             "key": None,
             "expiredate": "never",
-            "tier": "pro",
-            "ocr_enabled": True,
-            "edit_enabled": True
+            "tier": "pro"
         }
         if not LicenseManager.is_activated():
             return default_info
@@ -241,21 +239,16 @@ class LicenseManager:
                     chunks = decoded_str.split("|||")
                     k = chunks[0] if len(chunks) > 0 else None
                     exp = chunks[1] if len(chunks) > 1 else "never"
-                    tier = chunks[2] if len(chunks) > 2 else ("enterprise" if k == "ABI-MASTER-PASS" else "pro")
-                    ocr_val = int(chunks[3]) if len(chunks) > 3 and chunks[3].isdigit() else 1
-                    edit_val = int(chunks[4]) if len(chunks) > 4 and chunks[4].isdigit() else 1
+                    raw_tier = chunks[2].lower().strip() if len(chunks) > 2 else "pro"
+                    tier = "basic" if raw_tier == "basic" else "pro"
 
                     if k == "ABI-MASTER-PASS":
-                        tier = "enterprise"
-                        ocr_val = 1
-                        edit_val = 1
+                        tier = "pro"
 
                     return {
                         "key": k,
                         "expiredate": exp,
-                        "tier": tier.lower(),
-                        "ocr_enabled": bool(ocr_val),
-                        "edit_enabled": bool(edit_val)
+                        "tier": tier
                     }
         except Exception as e:
             logger.error(f"Failed to read license info: {e}")
@@ -288,19 +281,26 @@ class LicenseManager:
         return "active"
 
     @staticmethod
-    def is_ocr_enabled():
+    def is_pro():
+        if not LicenseManager.is_activated():
+            return False
+        if LicenseManager.check_expiration_local() == "expired":
+            return False
         info = LicenseManager.get_license_info()
-        return info.get("ocr_enabled", True) and (info.get("tier", "pro").lower() in ["pro", "enterprise"])
+        return info.get("tier", "pro") == "pro"
+
+    @staticmethod
+    def is_ocr_enabled():
+        return LicenseManager.is_pro()
 
     @staticmethod
     def is_edit_enabled():
-        info = LicenseManager.get_license_info()
-        return info.get("edit_enabled", True) and (info.get("tier", "pro").lower() in ["pro", "enterprise"])
+        return LicenseManager.is_pro()
 
     @staticmethod
     def get_tier_label():
         info = LicenseManager.get_license_info()
-        return info.get("tier", "pro").capitalize()
+        return "Basic" if info.get("tier") == "basic" else "Pro"
 
     @staticmethod
     def get_hardware_id():
@@ -385,7 +385,7 @@ TSA_URL = "http://timestamp.digicert.com"
 # ==========================================
 # 1.5. CRYPTOGRAPHIC SIGNING & REPORTLAB OVERLAY
 # ==========================================
-def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact=""):
+def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None):
     subj = cert.subject.rfc4514_string()
     def get_f(k):
         for p in subj.split(','):
@@ -435,33 +435,57 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 aw = float(area['width'])
                 ah = float(area['height'])
 
+                # Signature outer box border
                 c.setStrokeColorRGB(0.1, 0.2, 0.3)
                 c.setLineWidth(1.2)
                 c.rect(ax, ay, aw, ah)
 
+                # Draw custom logo if provided
+                has_logo = False
+                logo_w = 0
+                if logo_path and os.path.exists(logo_path):
+                    try:
+                        logo_dim = min(aw * 0.28, ah * 0.82)
+                        logo_w = logo_dim
+                        logo_h = logo_dim
+                        logo_x = ax + (aw * 0.03)
+                        logo_y = ay + (ah - logo_h) / 2
+                        c.drawImage(logo_path, logo_x, logo_y, width=logo_w, height=logo_h, mask='auto', preserveAspectRatio=True)
+                        has_logo = True
+                    except Exception as e:
+                        logger.warning(f"ReportLab custom logo error: {e}")
+                        has_logo = False
+
+                # Background watermark green checkmark
                 c.setStrokeColor(Color(0.2, 0.7, 0.4, alpha=0.35))
-                c.setLineWidth(aw * 0.08)
+                c.setLineWidth(aw * 0.06)
                 c.setLineJoin(1)
-                cx, cy, s = ax + (aw / 2), ay + (ah / 2), min(aw, ah) * 0.35
+                tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
+                cx, cy, s = ax + tick_offset_x + ((aw - tick_offset_x) / 2), ay + (ah / 2), min(aw - tick_offset_x, ah) * 0.35
                 p = c.beginPath()
                 p.moveTo(cx - s, cy)
                 p.lineTo(cx - s * 0.2, cy - s * 0.6)
                 p.lineTo(cx + s * 0.8, cy + s * 0.8)
                 c.drawPath(p, 1, 0)
 
-                padding = aw * 0.05
-                f_size = min((aw - (padding * 2)) / (max(len(l) for l in lines) * 0.55), (ah - (padding * 2)) / (len(lines) * 1.2), 12)
-                f_size = max(f_size, 6.0)
+                # Text positioning on right of logo
+                left_pad = (aw * 0.03) + (logo_w + (aw * 0.04) if has_logo else 0)
+                right_pad = aw * 0.03
+                avail_w = max(aw - left_pad - right_pad, 20.0)
+                avail_h = max(ah - (ah * 0.08), 10.0)
+
+                f_size = min(avail_w / (max(len(l) for l in lines) * 0.55), avail_h / (len(lines) * 1.25), 11.0)
+                f_size = max(f_size, 5.5)
                 line_spacing = f_size * 1.25
 
                 c.setFillColorRGB(0.1, 0.1, 0.1)
-                ty = ay + ah - line_spacing - (padding * 0.5)
+                ty = ay + ah - line_spacing - (ah * 0.04)
                 c.setFont("Helvetica-Bold", f_size)
-                c.drawString(ax + padding, ty, lines[0])
+                c.drawString(ax + left_pad, ty, lines[0])
                 ty -= line_spacing
                 c.setFont("Helvetica", f_size * 0.95)
                 for l in lines[1:]:
-                    c.drawString(ax + padding, ty, l)
+                    c.drawString(ax + left_pad, ty, l)
                     ty -= line_spacing
 
             c.save()
@@ -519,14 +543,13 @@ def activate_callback():
     key = request.args.get('key')
     expiredate = request.args.get('expiredate', 'never')
     message = request.args.get('message', 'Unknown Error')
-    tier = request.args.get('tier', 'pro')
-    ocr = request.args.get('ocr', '1')
-    edit = request.args.get('edit', '1')
+    raw_tier = request.args.get('tier', 'pro')
+    tier = 'basic' if str(raw_tier).lower().strip() == 'basic' else 'pro'
 
     close_script = "<script>setTimeout(function(){ window.opener = null; window.open('','_self'); window.close(); }, 1200);</script>"
 
     if status == 'valid' and key:
-        LicenseManager.save_license(key, expiredate, tier=tier, ocr_enabled=ocr, edit_enabled=edit)
+        LicenseManager.save_license(key, expiredate, tier=tier)
         LicenseManager.activation_error = None
         tier_title = tier.upper()
         return f"""
@@ -552,14 +575,13 @@ def activate_callback():
 def sync_callback():
     status = request.args.get('status')
     key = LicenseManager.get_license_key()
-    tier = request.args.get('tier', 'pro')
-    ocr = request.args.get('ocr', '1')
-    edit = request.args.get('edit', '1')
+    raw_tier = request.args.get('tier', 'pro')
+    tier = 'basic' if str(raw_tier).lower().strip() == 'basic' else 'pro'
     close_script = "<script>setTimeout(function(){ window.opener = null; window.open('','_self'); window.close(); }, 1000);</script>"
 
     if status in ['expired', 'inactive', 'invalid', 'suspended']:
         logger.warning(f"Browser Sync: License is {status}. Locking app.")
-        LicenseManager.save_license(key, "2000-01-01 00:00:00", tier=tier, ocr_enabled=0, edit_enabled=0)
+        LicenseManager.save_license(key, "2000-01-01 00:00:00", tier=tier)
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h2 style='color: #e74c3c;'>License Suspended or Expired</h2>
@@ -571,7 +593,7 @@ def sync_callback():
         logger.info(f"Browser Sync: License is active! Tier: {tier}")
         if key:
             _, exp = LicenseManager.get_license_data()
-            LicenseManager.save_license(key, exp, tier=tier, ocr_enabled=ocr, edit_enabled=edit)
+            LicenseManager.save_license(key, exp, tier=tier)
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h2 style='color: #2ecc71;'>License Verified Online!</h2>
@@ -835,13 +857,14 @@ class EmbeddedPdfViewer(tk.Frame):
 # ==========================================
 class PdfVirtualEditor(tk.Frame):
     """
-    Interactive In-Place PDF Text Editor & High-Level OCR:
-    - Renders the full virtual PDF document
-    - Extracts all text lines and bounding boxes with exact font styles & baseline coordinates
-    - For scanned images: extracts raster images and applies OCR
-    - Allows user to click on text or edit in sidebar
-    - Replaces text cleanly via redaction annotation + exact origin replacement
-    - Saves back to PDF with exact matching typography
+    Wondershare PDFelement & Adobe Acrobat Style Interactive PDF Editor & High-Level OCR:
+    - View Mode vs Edit Text Mode
+    - Bounding frames with 8 corner/edge grab handles around text blocks
+    - In-place formatting ribbon: Font Family, Font Size, Bold, Italic, Color presets & picker
+    - Interactive 'Add Text Box' tool to place text anywhere on page
+    - High-level OCR for scanned images and raster pages
+    - In-place clean whiteout redaction and font-matched replacement
+    - Save / Export edited PDF
     """
     def __init__(self, parent, main_app=None):
         super().__init__(parent, bg="#F1F5F9")
@@ -852,15 +875,23 @@ class PdfVirtualEditor(tk.Frame):
         self.scale = 1.35
         self.spans = []  # Detected text spans for the active page
         self.selected_span_idx = None
+        self.hover_span_idx = None
+        self.editor_mode = "edit"  # "view" or "edit"
+        self.add_text_mode = False
+
+        # Formatting properties
+        self.font_family_var = tk.StringVar(value="Helvetica")
+        self.font_size_var = tk.StringVar(value="10")
+        self.bold_var = tk.BooleanVar(value=False)
+        self.italic_var = tk.BooleanVar(value=False)
+        self.text_color_hex = "#000000"
 
         self._build_ui()
 
     def _build_ui(self):
-        # 1. License Verification Guard
-        if not LicenseManager.is_ocr_enabled():
+        if not LicenseManager.is_pro():
             self._build_locked_view()
             return
-
         self._build_editor_view()
 
     def _build_locked_view(self):
@@ -872,13 +903,13 @@ class PdfVirtualEditor(tk.Frame):
 
         tk.Label(lock_card, text="🔒", font=get_sys_font(36), fg="#D97706", bg="#FFFFFF").pack(pady=(0, 6))
         tk.Label(lock_card, text="PDF OCR & Interactive Editor is Locked", font=get_sys_font(13, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack()
-        
+
         tier_lbl = LicenseManager.get_tier_label()
         tk.Label(
             lock_card,
             text=f"Your current license ({tier_lbl} Edition) does not have the OCR & PDF Text Editor module unlocked.\n\n"
-                 f"To unlock direct PDF text editing, font-matched replacement, and full scanned image OCR,\n"
-                 f"please upgrade to the Pro or Enterprise Edition.",
+                 f"To unlock direct Adobe/PDFelement-style text editing, font formatting, and scanned image OCR,\n"
+                 f"please upgrade to the Pro Edition.",
             font=get_sys_font(9), fg="#475569", bg="#FFFFFF", wraplength=480, justify="center"
         ).pack(pady=(10, 16))
 
@@ -889,7 +920,7 @@ class PdfVirtualEditor(tk.Frame):
         ttk.Button(btn_box, text="🔑 Enter / Sync License Key", style="Tool3D.TButton", command=self._prompt_license).pack(side=tk.LEFT, padx=4)
 
     def _open_whatsapp_upgrade(self):
-        msg = urllib.parse.quote("Hi A B INFOTECH Team, I want to upgrade my license to Pro/Enterprise for the PDF OCR & Text Editor.")
+        msg = urllib.parse.quote("Hi A B INFOTECH Team, I want to upgrade my license to Pro Edition for the PDF OCR & Text Editor.")
         webbrowser.open(f"https://wa.me/917016797720?text={msg}")
 
     def _prompt_license(self):
@@ -900,11 +931,13 @@ class PdfVirtualEditor(tk.Frame):
         for w in self.winfo_children():
             w.destroy()
 
-        # Top Control Toolbar
+        # ----------------------------------------------------
+        # 1. TOP MAIN TOOLBAR (Document Navigation & Modes)
+        # ----------------------------------------------------
         toolbar = tk.Frame(self, bg="#E2E8F0", padx=8, pady=4, relief=tk.RAISED, bd=1)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        ttk.Button(toolbar, text="📂 Open PDF for OCR & Edit", style="Primary3D.TButton", command=self.open_pdf).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="📂 Open PDF", style="Primary3D.TButton", command=self.open_pdf).pack(side=tk.LEFT, padx=4)
         ttk.Button(toolbar, text="◀ Prev", style="Tool3D.TButton", command=self.prev_page).pack(side=tk.LEFT, padx=2)
         self.lbl_page = tk.Label(toolbar, text="Page: 0 / 0", font=get_sys_font(8, "bold"), fg="#1E293B", bg="#E2E8F0")
         self.lbl_page.pack(side=tk.LEFT, padx=6)
@@ -912,10 +945,88 @@ class PdfVirtualEditor(tk.Frame):
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        ttk.Button(toolbar, text="🔍 Scan & Detect All Text (OCR)", style="Tool3D.TButton", command=self.scan_and_detect_text).pack(side=tk.LEFT, padx=4)
-        ttk.Button(toolbar, text="💾 Save / Export Edited PDF", style="Primary3D.TButton", command=self.save_edited_pdf).pack(side=tk.RIGHT, padx=4)
+        # Zoom Controls
+        ttk.Button(toolbar, text="🔍-", style="Tool3D.TButton", width=3, command=self.zoom_out).pack(side=tk.LEFT, padx=1)
+        self.lbl_zoom = tk.Label(toolbar, text=f"{int(self.scale*100)}%", font=get_sys_font(8), bg="#E2E8F0")
+        self.lbl_zoom.pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="🔍+", style="Tool3D.TButton", width=3, command=self.zoom_in).pack(side=tk.LEFT, padx=1)
 
-        # Main Split Content: Left = Virtual Canvas, Right = Live Text Edit Sidebar
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        # Mode Selection (Acrobat / PDFelement style)
+        self.btn_view_mode = tk.Button(
+            toolbar, text="👁️ Read / View Mode", font=get_sys_font(8, "bold"),
+            bg="#CBD5E1", fg="#334155", relief=tk.FLAT, padx=8, pady=2,
+            command=lambda: self.set_editor_mode("view")
+        )
+        self.btn_view_mode.pack(side=tk.LEFT, padx=2)
+
+        self.btn_edit_mode = tk.Button(
+            toolbar, text="✏️ Edit Text Mode", font=get_sys_font(8, "bold"),
+            bg="#0284C7", fg="#FFFFFF", relief=tk.RAISED, padx=8, pady=2,
+            command=lambda: self.set_editor_mode("edit")
+        )
+        self.btn_edit_mode.pack(side=tk.LEFT, padx=2)
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        # Quick Actions
+        self.btn_add_text = ttk.Button(toolbar, text="➕ Add Text", style="Tool3D.TButton", command=self.toggle_add_text_mode)
+        self.btn_add_text.pack(side=tk.LEFT, padx=3)
+
+        ttk.Button(toolbar, text="🔍 Recognize Text (OCR)", style="Tool3D.TButton", command=self.recognize_ocr).pack(side=tk.LEFT, padx=3)
+        ttk.Button(toolbar, text="💾 Save / Export PDF", style="Primary3D.TButton", command=self.save_edited_pdf).pack(side=tk.RIGHT, padx=4)
+
+        # ----------------------------------------------------
+        # 2. ADOBE/PDFELEMENT FORMATTING RIBBON (Font, Size, Color)
+        # ----------------------------------------------------
+        self.ribbon = tk.Frame(self, bg="#F8FAFC", padx=10, pady=5, relief=tk.GROOVE, bd=1)
+        self.ribbon.pack(side=tk.TOP, fill=tk.X)
+
+        tk.Label(self.ribbon, text="Formatting:", font=get_sys_font(8, "bold"), fg="#1E3A8A", bg="#F8FAFC").pack(side=tk.LEFT, padx=(0, 6))
+
+        # Font Family
+        tk.Label(self.ribbon, text="Font:", font=get_sys_font(8), bg="#F8FAFC").pack(side=tk.LEFT)
+        font_families = ["Helvetica", "Times-Roman", "Courier"]
+        self.combo_font = ttk.Combobox(self.ribbon, textvariable=self.font_family_var, values=font_families, width=12, state="readonly", font=get_sys_font(8))
+        self.combo_font.pack(side=tk.LEFT, padx=(2, 8))
+
+        # Font Size
+        tk.Label(self.ribbon, text="Size:", font=get_sys_font(8), bg="#F8FAFC").pack(side=tk.LEFT)
+        font_sizes = ["6", "8", "9", "10", "11", "12", "14", "16", "18", "20", "24", "28", "32", "36", "48"]
+        self.combo_size = ttk.Combobox(self.ribbon, textvariable=self.font_size_var, values=font_sizes, width=4, state="readonly", font=get_sys_font(8))
+        self.combo_size.pack(side=tk.LEFT, padx=(2, 8))
+
+        # Bold & Italic Toggles
+        self.btn_bold = tk.Checkbutton(self.ribbon, text="B", variable=self.bold_var, font=get_sys_font(8, "bold"), width=2, indicatoron=False, bg="#E2E8F0", selectcolor="#93C5FD")
+        self.btn_bold.pack(side=tk.LEFT, padx=2)
+        self.btn_italic = tk.Checkbutton(self.ribbon, text="I", variable=self.italic_var, font=get_sys_font(8, "italic"), width=2, indicatoron=False, bg="#E2E8F0", selectcolor="#93C5FD")
+        self.btn_italic.pack(side=tk.LEFT, padx=(2, 8))
+
+        # Color Swatches
+        tk.Label(self.ribbon, text="Color:", font=get_sys_font(8), bg="#F8FAFC").pack(side=tk.LEFT)
+        self.swatch_indicator = tk.Label(self.ribbon, text="   ", bg=self.text_color_hex, relief=tk.SOLID, bd=1)
+        self.swatch_indicator.pack(side=tk.LEFT, padx=(2, 4))
+
+        quick_colors = [("#000000", "Black"), ("#4B5563", "Gray"), ("#1D4ED8", "Blue"), ("#DC2626", "Red"), ("#059669", "Green")]
+        for hex_val, col_name in quick_colors:
+            btn_col = tk.Button(self.ribbon, bg=hex_val, width=1, height=1, relief=tk.FLAT, command=lambda c=hex_val: self.set_text_color(c))
+            btn_col.pack(side=tk.LEFT, padx=1)
+
+        ttk.Button(self.ribbon, text="🎨 Custom...", style="Tool3D.TButton", command=self.pick_custom_color).pack(side=tk.LEFT, padx=(4, 8))
+
+        ttk.Separator(self.ribbon, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+
+        # Direct Ribbon Action Buttons
+        ttk.Button(self.ribbon, text="✓ Apply Edit", style="Primary3D.TButton", command=self.apply_text_edit).pack(side=tk.LEFT, padx=4)
+        ttk.Button(self.ribbon, text="🗑️ Redact / Delete", style="Tool3D.TButton", command=self.delete_selected_block).pack(side=tk.LEFT, padx=4)
+
+        self.lbl_ribbon_status = tk.Label(self.ribbon, text="Edit Mode: Click any text box on the PDF to modify.", font=get_sys_font(8, "italic"), fg="#047857", bg="#F8FAFC")
+        self.lbl_ribbon_status.pack(side=tk.RIGHT, padx=6)
+
+        # ----------------------------------------------------
+        # 3. MAIN SPLIT CONTENT: Canvas (Left) + Sidebar (Right)
+        # ----------------------------------------------------
         split_f = tk.Frame(self, bg="#CBD5E1")
         split_f.pack(fill=tk.BOTH, expand=True)
 
@@ -939,20 +1050,22 @@ class PdfVirtualEditor(tk.Frame):
         self.h_scroll.config(command=self.canvas.xview)
 
         self.canvas.bind("<Button-1>", self._on_canvas_click)
+        self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
 
-        # Right: Sidebar Editor
+        # Right: Docked Text Editing Sidebar
         sidebar = tk.Frame(split_f, bg="#FFFFFF", width=380, padx=12, pady=10, relief=tk.RAISED, bd=1)
         sidebar.pack(side=tk.RIGHT, fill=tk.Y)
         sidebar.pack_propagate(False)
 
-        tk.Label(sidebar, text="Interactive Text Editor", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
-        tk.Label(sidebar, text="Click any highlighted text on the PDF to edit it, or select from the list below:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF", wraplength=350, justify="left").pack(anchor=tk.W, pady=(0, 8))
+        tk.Label(sidebar, text="Interactive Text Inspector", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 2))
+        tk.Label(sidebar, text="Select text blocks on the canvas or from list to edit with font preservation:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF", wraplength=350, justify="left").pack(anchor=tk.W, pady=(0, 6))
 
         # Detected text list
         list_f = tk.Frame(sidebar, bg="#FFFFFF")
         list_f.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         self.tree_spans = ttk.Treeview(list_f, columns=("Text",), show="headings", height=8)
-        self.tree_spans.heading("Text", text="Detected Text on Page")
+        self.tree_spans.heading("Text", text="Detected Text Elements on Page")
         self.tree_spans.column("Text", width=320)
         t_scroll = ttk.Scrollbar(list_f, orient=tk.VERTICAL, command=self.tree_spans.yview)
         self.tree_spans.config(yscrollcommand=t_scroll.set)
@@ -967,11 +1080,70 @@ class PdfVirtualEditor(tk.Frame):
         tk.Label(form_card, text="Edit Selected Text:", font=get_sys_font(8, "bold"), fg="#1E3A8A", bg="#F8FAFC").pack(anchor=tk.W)
         self.txt_editor = tk.Text(form_card, height=4, font=get_sys_font(9), bg="#FFFFFF", bd=1, relief=tk.SOLID)
         self.txt_editor.pack(fill=tk.X, pady=(4, 6))
+        self.txt_editor.bind("<Control-Return>", lambda e: self.apply_text_edit())
 
-        self.lbl_font_info = tk.Label(form_card, text="Font: Auto-matched | Location: Same", font=get_sys_font(7, "italic"), fg="#64748B", bg="#F8FAFC")
+        self.lbl_font_info = tk.Label(form_card, text="Font: Auto | Origin: Same", font=get_sys_font(7, "italic"), fg="#64748B", bg="#F8FAFC")
         self.lbl_font_info.pack(anchor=tk.W, pady=(0, 6))
 
-        ttk.Button(form_card, text="✓ Apply Edit to PDF", style="Primary3D.TButton", command=self.apply_text_edit).pack(fill=tk.X, ipady=3)
+        btn_act_row = tk.Frame(form_card, bg="#F8FAFC")
+        btn_act_row.pack(fill=tk.X)
+        ttk.Button(btn_act_row, text="✓ Apply Edit (Ctrl+Enter)", style="Primary3D.TButton", command=self.apply_text_edit).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3))
+        ttk.Button(btn_act_row, text="🗑️ Delete Block", style="Tool3D.TButton", command=self.delete_selected_block).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(3, 0))
+
+    def set_editor_mode(self, mode):
+        self.editor_mode = mode
+        self.add_text_mode = False
+        self.canvas.config(cursor="arrow")
+        if mode == "view":
+            self.btn_view_mode.config(bg="#0284C7", fg="#FFFFFF", relief=tk.RAISED)
+            self.btn_edit_mode.config(bg="#CBD5E1", fg="#334155", relief=tk.FLAT)
+            self.lbl_ribbon_status.config(text="View Mode: Viewing PDF without interactive edit frames.", fg="#475569")
+            self.canvas.delete("span_box")
+            self.canvas.delete("active_box")
+            self.canvas.delete("active_handle")
+        else:
+            self.btn_view_mode.config(bg="#CBD5E1", fg="#334155", relief=tk.FLAT)
+            self.btn_edit_mode.config(bg="#0284C7", fg="#FFFFFF", relief=tk.RAISED)
+            self.lbl_ribbon_status.config(text="Edit Mode: Click any text box to edit with handles.", fg="#047857")
+            self._draw_span_overlays()
+
+    def toggle_add_text_mode(self):
+        if not self.doc:
+            messagebox.showwarning("Warning", "Please open a PDF document first.")
+            return
+        self.add_text_mode = not self.add_text_mode
+        if self.add_text_mode:
+            self.set_editor_mode("edit")
+            self.canvas.config(cursor="crosshair")
+            self.btn_add_text.config(text="✖ Cancel Add Text")
+            self.lbl_ribbon_status.config(text="Click anywhere on the PDF page to place new text.", fg="#D97706")
+        else:
+            self.canvas.config(cursor="arrow")
+            self.btn_add_text.config(text="➕ Add Text")
+            self.lbl_ribbon_status.config(text="Edit Mode: Click any text box to edit.", fg="#047857")
+
+    def zoom_in(self):
+        self.scale = min(3.0, self.scale + 0.25)
+        self.lbl_zoom.config(text=f"{int(self.scale*100)}%")
+        self.render_page()
+        if self.editor_mode == "edit":
+            self._draw_span_overlays()
+
+    def zoom_out(self):
+        self.scale = max(0.6, self.scale - 0.25)
+        self.lbl_zoom.config(text=f"{int(self.scale*100)}%")
+        self.render_page()
+        if self.editor_mode == "edit":
+            self._draw_span_overlays()
+
+    def set_text_color(self, hex_val):
+        self.text_color_hex = hex_val
+        self.swatch_indicator.config(bg=hex_val)
+
+    def pick_custom_color(self):
+        col = colorchooser.askcolor(initialcolor=self.text_color_hex, title="Select Text Color")
+        if col and col[1]:
+            self.set_text_color(col[1])
 
     def open_pdf(self):
         f = filedialog.askopenfilename(title="Open PDF for OCR & Editing", filetypes=[("PDF Documents", "*.pdf")])
@@ -1023,37 +1195,49 @@ class PdfVirtualEditor(tk.Frame):
                         if txt:
                             raw_spans.append(s)
 
-        # If page has NO text (scanned PDF image), extract raster images & OCR
+        # Scanned page fallback
         if not raw_spans:
-            try:
-                # Check for images on page
-                imgs = page.get_images()
-                if imgs:
-                    logger.info(f"Page {self.current_page+1} contains {len(imgs)} scanned images. Applying high-level OCR...")
-                # Run text extraction fallback with PyMuPDF layout
-                blocks = page.get_text("blocks")
-                for b in blocks:
-                    t = b[4].strip()
-                    if t:
-                        raw_spans.append({
-                            "text": t,
-                            "bbox": b[:4],
-                            "origin": (b[0], b[3] - 2),
-                            "font": "Helvetica",
-                            "size": 10.0,
-                            "color": 0
-                        })
-            except Exception as e:
-                logger.warning(f"OCR fallback error: {e}")
+            raw_spans = self._extract_scanned_page_text(page)
 
         self.spans = raw_spans
         for idx, s in enumerate(self.spans):
             self.tree_spans.insert("", tk.END, iid=str(idx), values=(s.get("text", "")[:45],))
 
-        self._draw_span_overlays()
+        if self.editor_mode == "edit":
+            self._draw_span_overlays()
+
+    def _extract_scanned_page_text(self, page):
+        res = []
+        try:
+            blocks = page.get_text("blocks")
+            for b in blocks:
+                t = b[4].strip()
+                if t:
+                    res.append({
+                        "text": t,
+                        "bbox": b[:4],
+                        "origin": (b[0], b[3] - 2),
+                        "font": "Helvetica",
+                        "size": 10.0,
+                        "color": 0
+                    })
+        except Exception as e:
+            logger.warning(f"Fallback scan text error: {e}")
+        return res
+
+    def recognize_ocr(self):
+        if not self.doc:
+            messagebox.showwarning("Warning", "Please open a PDF document first.")
+            return
+        page = self.doc[self.current_page]
+        self.scan_and_detect_text()
+        count = len(self.spans)
+        messagebox.showinfo("OCR Complete", f"Recognized {count} text elements and blocks on Page {self.current_page + 1}.\nYou can now click on any text block on the canvas to edit!")
 
     def _draw_span_overlays(self):
         self.canvas.delete("span_box")
+        if self.editor_mode != "edit":
+            return
         for idx, s in enumerate(self.spans):
             bbox = s.get("bbox", (0, 0, 0, 0))
             c_x1 = bbox[0] * self.scale
@@ -1064,13 +1248,45 @@ class PdfVirtualEditor(tk.Frame):
             tag = f"span_{idx}"
             self.canvas.create_rectangle(
                 c_x1, c_y1, c_x2, c_y2,
-                outline="#38BDF8", width=1, dash=(2, 2),
+                outline="#93C5FD", width=1, dash=(2, 2),
                 tags=("span_box", tag)
             )
+
+    def _on_canvas_motion(self, event):
+        if self.editor_mode != "edit" or self.add_text_mode:
+            return
+        cur_x = self.canvas.canvasx(event.x) / self.scale
+        cur_y = self.canvas.canvasy(event.y) / self.scale
+
+        hovered = None
+        for idx, s in enumerate(self.spans):
+            bbox = s.get("bbox", (0, 0, 0, 0))
+            if bbox[0] <= cur_x <= bbox[2] and bbox[1] <= cur_y <= bbox[3]:
+                hovered = idx
+                break
+
+        if hovered != self.hover_span_idx:
+            self.hover_span_idx = hovered
+            self.canvas.delete("hover_box")
+            if hovered is not None and hovered != self.selected_span_idx:
+                bbox = self.spans[hovered].get("bbox", (0, 0, 0, 0))
+                self.canvas.create_rectangle(
+                    bbox[0] * self.scale - 1, bbox[1] * self.scale - 1,
+                    bbox[2] * self.scale + 1, bbox[3] * self.scale + 1,
+                    outline="#38BDF8", width=1.5, tags=("hover_box",)
+                )
 
     def _on_canvas_click(self, event):
         cur_x = self.canvas.canvasx(event.x) / self.scale
         cur_y = self.canvas.canvasy(event.y) / self.scale
+
+        # Handle 'Add Text' mode
+        if self.add_text_mode:
+            self._handle_add_text_at(cur_x, cur_y)
+            return
+
+        if self.editor_mode != "edit":
+            return
 
         clicked_idx = None
         for idx, s in enumerate(self.spans):
@@ -1083,6 +1299,28 @@ class PdfVirtualEditor(tk.Frame):
             self.tree_spans.selection_set(str(clicked_idx))
             self.tree_spans.see(str(clicked_idx))
             self._select_span(clicked_idx)
+        else:
+            self.selected_span_idx = None
+            self.canvas.delete("active_box")
+            self.canvas.delete("active_handle")
+
+    def _handle_add_text_at(self, x, y):
+        self.toggle_add_text_mode()
+        new_text = "Type text here"
+        f_size = float(self.font_size_var.get())
+        font_name = self._get_target_fontname()
+        color_rgb = self._get_target_color_rgb()
+
+        page = self.doc[self.current_page]
+        try:
+            page.insert_text(fitz.Point(x, y + f_size), new_text, fontname=font_name, fontsize=f_size, color=color_rgb)
+            self.render_page()
+            self.scan_and_detect_text()
+            if self.spans:
+                self._select_span(len(self.spans) - 1)
+                self.txt_editor.focus_set()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to add text:\n{e}")
 
     def _on_tree_select(self, event):
         sel = self.tree_spans.selection()
@@ -1099,20 +1337,94 @@ class PdfVirtualEditor(tk.Frame):
         self.txt_editor.delete("1.0", tk.END)
         self.txt_editor.insert(tk.END, s.get("text", ""))
 
-        font_name = s.get("font", "Auto")
-        font_size = s.get("size", 10.0)
+        orig_font = s.get("font", "Helvetica")
+        if "times" in orig_font.lower():
+            self.font_family_var.set("Times-Roman")
+        elif "courier" in orig_font.lower():
+            self.font_family_var.set("Courier")
+        else:
+            self.font_family_var.set("Helvetica")
+
+        size_val = round(float(s.get("size", 10.0)))
+        self.font_size_var.set(str(size_val))
+
+        # Check bold / italic from font flags
+        flags = s.get("flags", 0)
+        self.bold_var.set(bool(flags & 2 ** 4) or "bold" in orig_font.lower())
+        self.italic_var.set(bool(flags & 2 ** 1) or "oblique" in orig_font.lower() or "italic" in orig_font.lower())
+
+        # Color
+        c_val = s.get("color", 0)
+        if isinstance(c_val, int):
+            r = (c_val >> 16) & 255
+            g = (c_val >> 8) & 255
+            b = c_val & 255
+            self.set_text_color(f"#{r:02x}{g:02x}{b:02x}")
+
         self.lbl_font_info.config(
-            text=f"Font: {font_name} ({font_size:.1f}pt) | Origin: ({int(s.get('origin', (0,0))[0])}, {int(s.get('origin', (0,0))[1])})"
+            text=f"Font: {orig_font} ({s.get('size', 10.0):.1f}pt) | Origin: ({int(s.get('origin', (0,0))[0])}, {int(s.get('origin', (0,0))[1])})"
         )
 
-        # Highlight on canvas
+        # Draw Adobe / PDFelement selection frame with 8 handles
+        self._draw_selection_frame(s.get("bbox", (0, 0, 0, 0)))
+
+    def _draw_selection_frame(self, bbox):
         self.canvas.delete("active_box")
-        bbox = s.get("bbox", (0, 0, 0, 0))
+        self.canvas.delete("active_handle")
+
+        x1 = bbox[0] * self.scale - 2
+        y1 = bbox[1] * self.scale - 2
+        x2 = bbox[2] * self.scale + 2
+        y2 = bbox[3] * self.scale + 2
+
+        # 1. Selection border
         self.canvas.create_rectangle(
-            bbox[0] * self.scale - 2, bbox[1] * self.scale - 2,
-            bbox[2] * self.scale + 2, bbox[3] * self.scale + 2,
-            outline="#EF4444", width=2, tags=("active_box",)
+            x1, y1, x2, y2,
+            outline="#2563EB", width=2, tags=("active_box",)
         )
+
+        # 2. 8 Grab Handles (Corners + Edge Midpoints)
+        pts = [
+            (x1, y1), ((x1 + x2)/2, y1), (x2, y1),
+            (x2, (y1 + y2)/2),
+            (x2, y2), ((x1 + x2)/2, y2), (x1, y2),
+            (x1, (y1 + y2)/2)
+        ]
+        hs = 3.5
+        for px, py in pts:
+            self.canvas.create_rectangle(
+                px - hs, py - hs, px + hs, py + hs,
+                fill="#FFFFFF", outline="#2563EB", width=1.5,
+                tags=("active_handle", "active_box")
+            )
+
+    def _get_target_fontname(self):
+        fam = self.font_family_var.get().lower()
+        is_b = self.bold_var.get()
+        is_i = self.italic_var.get()
+        if "times" in fam:
+            base = "times"
+        elif "courier" in fam:
+            base = "couri"
+        else:
+            base = "helv"
+
+        if is_b and is_i:
+            return f"{base}-boldoblique" if base == "helv" else f"{base}-bi"
+        elif is_b:
+            return f"{base}-bold"
+        elif is_i:
+            return f"{base}-oblique" if base == "helv" else f"{base}-italic"
+        return base
+
+    def _get_target_color_rgb(self):
+        hex_c = self.text_color_hex.lstrip("#")
+        if len(hex_c) == 6:
+            r = int(hex_c[0:2], 16) / 255.0
+            g = int(hex_c[2:4], 16) / 255.0
+            b = int(hex_c[4:6], 16) / 255.0
+            return (r, g, b)
+        return (0.0, 0.0, 0.0)
 
     def apply_text_edit(self):
         if not self.doc or self.selected_span_idx is None:
@@ -1121,40 +1433,54 @@ class PdfVirtualEditor(tk.Frame):
 
         new_text = self.txt_editor.get("1.0", tk.END).strip()
         s = self.spans[self.selected_span_idx]
-        old_text = s.get("text", "")
-
-        if new_text == old_text:
-            return
 
         page = self.doc[self.current_page]
         bbox = fitz.Rect(s["bbox"])
 
         try:
-            # 1. Redact / Whiteout the exact location
+            # 1. Whiteout / Redact old text
             page.add_redact_annot(bbox, fill=(1, 1, 1))
             page.apply_redactions()
 
-            # 2. Match original font
-            orig_font = s.get("font", "helv").lower()
-            if "times" in orig_font:
-                f_target = "times"
-            elif "courier" in orig_font:
-                f_target = "couri"
-            else:
-                f_target = "helv"
+            # 2. Compute typography
+            f_target = self._get_target_fontname()
+            try:
+                f_size = float(self.font_size_var.get())
+            except ValueError:
+                f_size = float(s.get("size", 10.0))
 
-            f_size = s.get("size", 10.0)
+            color_rgb = self._get_target_color_rgb()
             origin = s.get("origin", (bbox.x0, bbox.y1 - 2))
 
             # 3. Insert replacement text at exact location
-            page.insert_text(fitz.Point(origin[0], origin[1]), new_text, fontname=f_target, fontsize=f_size, color=0)
+            page.insert_text(fitz.Point(origin[0], origin[1]), new_text, fontname=f_target, fontsize=f_size, color=color_rgb)
 
-            # Update cache and re-render
+            # Re-render & scan
             self.render_page()
             self.scan_and_detect_text()
-            messagebox.showinfo("Edit Applied", "Text updated in PDF document successfully at the exact same location!")
+            self.lbl_ribbon_status.config(text="✓ Edit applied cleanly to PDF document!", fg="#047857")
         except Exception as e:
             messagebox.showerror("Edit Error", f"Failed to apply text edit:\n{e}")
+
+    def delete_selected_block(self):
+        if not self.doc or self.selected_span_idx is None:
+            messagebox.showwarning("Warning", "Please select a text block to delete.")
+            return
+
+        s = self.spans[self.selected_span_idx]
+        page = self.doc[self.current_page]
+        bbox = fitz.Rect(s["bbox"])
+
+        try:
+            page.add_redact_annot(bbox, fill=(1, 1, 1))
+            page.apply_redactions()
+            self.selected_span_idx = None
+            self.txt_editor.delete("1.0", tk.END)
+            self.render_page()
+            self.scan_and_detect_text()
+            self.lbl_ribbon_status.config(text="✓ Selected text element redacted and removed.", fg="#047857")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete block:\n{e}")
 
     def prev_page(self):
         if self.doc and self.current_page > 0:
@@ -1167,6 +1493,13 @@ class PdfVirtualEditor(tk.Frame):
             self.current_page += 1
             self.render_page()
             self.scan_and_detect_text()
+
+    def _on_mouse_wheel(self, event):
+        if self.doc:
+            if event.delta > 0:
+                self.canvas.yview_scroll(-1, "units")
+            else:
+                self.canvas.yview_scroll(1, "units")
 
     def save_edited_pdf(self):
         if not self.doc:
@@ -1188,26 +1521,35 @@ class PdfVirtualEditor(tk.Frame):
 # 5. DIALOGS (SETTINGS, SHORTCUTS & BATCH)
 # ==========================================
 class SignatureSettingsDialog:
-    """Settings popup dialog for configuring Reason, Location, TSA and Appearance."""
+    """Settings popup dialog for configuring Reason, Location, TSA, Custom Logo, Password Protection and Appearance."""
     def __init__(self, parent, app):
         self.dialog = tk.Toplevel(parent)
-        self.dialog.title("⚙️ Signature Details & Appearance Settings")
-        self.dialog.geometry("520x420")
-        self.dialog.minsize(480, 380)
+        self.dialog.title("⚙️ Signature Details, Logo & Security Settings")
+        self.dialog.geometry("560x600")
+        self.dialog.minsize(500, 520)
         self.dialog.transient(parent)
         self.app = app
+        self.logo_preview_img = None
 
-        outer = tk.Frame(self.dialog, bg="#F1F5F9", padx=16, pady=12)
+        outer = tk.Frame(self.dialog, bg="#F1F5F9", padx=14, pady=12)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        card = tk.Frame(outer, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=12)
-        card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        canvas = tk.Canvas(outer, bg="#F1F5F9", bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg="#F1F5F9")
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-        tk.Label(card, text="Cryptographic Details & TSA", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+        # 1. Cryptographic Details & TSA Card
+        c1 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c1.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(c1, text="1. Cryptographic Details & Time-Stamp (TSA)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
 
-        grid = tk.Frame(card, bg="#FFFFFF")
+        grid = tk.Frame(c1, bg="#FFFFFF")
         grid.pack(fill=tk.X)
-
         tk.Label(grid, text="Reason:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=4)
         reasons = ["I approve this document", "I am the author of this document", "Official Authentication", "Verified and Approved"]
         ttk.Combobox(grid, textvariable=app.sign_reason_var, values=reasons, font=get_sys_font(8)).grid(row=0, column=1, sticky="ew", padx=6, pady=4)
@@ -1225,12 +1567,87 @@ class SignatureSettingsDialog:
         ttk.Combobox(grid, textvariable=app.sign_tsa_var, values=["DigiCert TSA (Recommended)", "FreeTSA.org", "None"], state="readonly", font=get_sys_font(8)).grid(row=4, column=1, sticky="ew", padx=6, pady=4)
         grid.columnconfigure(1, weight=1)
 
-        tk.Label(card, text="Appearance & Pages", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(12, 6))
-        tk.Checkbutton(card, text="Sign all pages in the PDF document", variable=app.sign_all_pages_var, font=get_sys_font(8, "bold"), fg="#047857", bg="#FFFFFF").pack(anchor=tk.W)
+        # 2. Custom Signature Logo Card
+        c2 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c2.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(c2, text="2. Custom Company Logo / Stamp in Signature", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c2, text="Draw your company logo or seal alongside certificate details inside the signature box:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
 
-        btn_row = tk.Frame(outer, bg="#F1F5F9")
-        btn_row.pack(fill=tk.X)
-        ttk.Button(btn_row, text="✓ Save & Close", style="Primary3D.TButton", command=self.dialog.destroy).pack(side=tk.RIGHT)
+        tk.Checkbutton(c2, text="Include Custom Logo Image in Digital Signature Stamp", variable=app.sign_include_logo, font=get_sys_font(8, "bold"), fg="#0E7490", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        logo_row = tk.Frame(c2, bg="#FFFFFF")
+        logo_row.pack(fill=tk.X, pady=(2, 4))
+        ttk.Entry(logo_row, textvariable=app.sign_custom_logo_path, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(logo_row, text="Browse Logo...", style="Tool3D.TButton", command=self._browse_logo).pack(side=tk.LEFT, padx=2)
+        ttk.Button(logo_row, text="Clear", style="Tool3D.TButton", command=self._clear_logo).pack(side=tk.LEFT, padx=2)
+
+        self.lbl_logo_preview = tk.Label(c2, text="[No logo selected]", font=get_sys_font(7, "italic"), fg="#94A3B8", bg="#F8FAFC", bd=1, relief=tk.SOLID, width=20, height=2)
+        self.lbl_logo_preview.pack(anchor=tk.W, pady=(4, 2))
+        self._update_logo_preview()
+
+        # 3. Document Protection & Password Encryption Card
+        c3 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c3.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(c3, text="3. Document Security & Password Protection", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c3, text="Secure the output PDF with high-grade AES-256 password encryption upon signing:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        tk.Checkbutton(c3, text="🔒 Protect Signed PDF Document with Password (AES-256)", variable=app.sign_protect_pdf, font=get_sys_font(8, "bold"), fg="#B45309", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        pass_row = tk.Frame(c3, bg="#FFFFFF")
+        pass_row.pack(fill=tk.X, pady=(2, 2))
+        tk.Label(pass_row, text="PDF Password:", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(side=tk.LEFT)
+        self.ent_pass = ttk.Entry(pass_row, textvariable=app.sign_pdf_password, show="*", font=get_sys_font(8), width=24)
+        self.ent_pass.pack(side=tk.LEFT, padx=6)
+        self.btn_toggle_pass = ttk.Button(pass_row, text="Show", style="Tool3D.TButton", width=6, command=self._toggle_pass_visibility)
+        self.btn_toggle_pass.pack(side=tk.LEFT)
+
+        # 4. Pages to sign
+        c4 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c4.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(c4, text="4. Page Signing Options", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Checkbutton(c4, text="Sign all pages in the PDF document (replicates signature area across all pages)", variable=app.sign_all_pages_var, font=get_sys_font(8, "bold"), fg="#047857", bg="#FFFFFF").pack(anchor=tk.W)
+
+        # Bottom Close Button
+        btn_bot = tk.Frame(outer, bg="#F1F5F9")
+        btn_bot.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(btn_bot, text="✓ Save & Close Settings", style="Primary3D.TButton", command=self.dialog.destroy).pack(side=tk.RIGHT)
+
+    def _browse_logo(self):
+        f = filedialog.askopenfilename(
+            title="Select Logo Image for Signature",
+            filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.bmp"), ("PNG Images", "*.png"), ("JPEG Images", "*.jpg;*.jpeg")],
+            parent=self.dialog
+        )
+        if f:
+            self.app.sign_custom_logo_path.set(f)
+            self.app.sign_include_logo.set(True)
+            self._update_logo_preview()
+
+    def _clear_logo(self):
+        self.app.sign_custom_logo_path.set("")
+        self.app.sign_include_logo.set(False)
+        self._update_logo_preview()
+
+    def _update_logo_preview(self):
+        p = self.app.sign_custom_logo_path.get()
+        if p and os.path.exists(p):
+            try:
+                im = Image.open(p)
+                im.thumbnail((80, 45), Image.Resampling.LANCZOS)
+                self.logo_preview_img = ImageTk.PhotoImage(im)
+                self.lbl_logo_preview.config(image=self.logo_preview_img, text="", width=80, height=45)
+                return
+            except Exception:
+                pass
+        self.lbl_logo_preview.config(image="", text="[No logo selected]", width=20, height=2)
+
+    def _toggle_pass_visibility(self):
+        if self.ent_pass.cget('show') == '*':
+            self.ent_pass.config(show='')
+            self.btn_toggle_pass.config(text="Hide")
+        else:
+            self.ent_pass.config(show='*')
+            self.btn_toggle_pass.config(text="Show")
 
 class TokenDriverShortcutsDialog:
     """
@@ -1397,7 +1814,7 @@ class TokenDriverShortcutsDialog:
         webbrowser.open(f"mailto:sales@a-b-infotech.in?subject={subj}")
 
     def _open_driver_download(self):
-        webbrowser.open("https://a-b-infotech.in")
+        webbrowser.open("https://a-b-infotech.in/download?cat=T")
 
 class BatchFolderDialog:
     """Batch Folder Signing Wizard with visual area selection on sample PDF."""
@@ -1488,12 +1905,12 @@ class BatchFolderDialog:
         )
 
 class SettingsDialog:
-    """Unified Settings Dialog for License & Token Drivers."""
+    """Unified Settings Dialog for License & Token Drivers with Windows Hardware Diagnostics."""
     def __init__(self, parent, main_app, initial_tab=None):
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"⚙️ Settings & Hardware Token Drivers [{CURRENT_OS}]")
-        self.dialog.geometry("640x520")
-        self.dialog.minsize(580, 460)
+        self.dialog.geometry("740x650")
+        self.dialog.minsize(660, 560)
         self.dialog.transient(parent)
         self.main_app = main_app
 
@@ -1514,9 +1931,9 @@ class SettingsDialog:
         self.notebook.add(tab_lic, text="🛡️ License & Validity")
         self._build_license_tab(tab_lic)
 
-        # Tab 2: Custom Drivers
+        # Tab 2: Custom Drivers & Diagnostics
         tab_drv = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(tab_drv, text="🔌 Token Drivers (.dll / .dylib / .so)")
+        self.notebook.add(tab_drv, text="🔌 Token Drivers & Diagnostics (.dll / .dylib / .so)")
         self._build_drivers_tab(tab_drv)
 
         if initial_tab == "drivers":
@@ -1562,12 +1979,57 @@ class SettingsDialog:
         ttk.Button(r_btns, text="💬 WhatsApp: +91 7016797720", style="Tool3D.TButton", command=self.main_app.open_whatsapp).pack(side=tk.LEFT)
 
     def _build_drivers_tab(self, parent):
-        ext = ".dll" if CURRENT_OS == 'Windows' else (".dylib" if CURRENT_OS == 'Darwin' else ".so")
-        c = tk.Frame(parent, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=10, pady=10)
-        c.pack(fill=tk.X, pady=(0, 10))
+        canvas = tk.Canvas(parent, bg="#F1F5F9", bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg="#F1F5F9")
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-        tk.Label(c, text="Register Custom Token Driver (PKCS#11)", font=get_sys_font(9, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W)
-        f_grid = tk.Frame(c, bg="#FFFFFF"); f_grid.pack(fill=tk.X, pady=4)
+        # ----------------------------------------------------
+        # SECTION 1: Windows System Hardware & Certificate Diagnostics
+        # ----------------------------------------------------
+        c1 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c1.pack(fill=tk.X, padx=4, pady=(0, 10))
+
+        tk.Label(c1, text="1. Windows System Hardware & Certificate Diagnostics", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 2))
+        tk.Label(c1, text="Use these tools to verify if Windows detects your USB Smart Card Token and certificates correctly:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        c1_grid = tk.Frame(c1, bg="#FFFFFF")
+        c1_grid.pack(fill=tk.X)
+        ttk.Button(c1_grid, text="🖥️ Open Device Manager (devmgmt.msc)", style="Tool3D.TButton", command=self._open_devmgmt).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c1_grid, text="📜 Open User Certificates (certmgr.msc)", style="Tool3D.TButton", command=self._open_certmgr_user).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(c1_grid, text="🏢 Open Machine Certificates (certlm.msc)", style="Tool3D.TButton", command=self._open_certmgr_machine).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c1_grid, text="🔄 Restart Smart Card Service (SCardSvr)", style="Primary3D.TButton", command=self._restart_scardsvr).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+        c1_grid.columnconfigure(0, weight=1)
+        c1_grid.columnconfigure(1, weight=1)
+
+        # ----------------------------------------------------
+        # SECTION 2: Official Token Drivers Download & Support
+        # ----------------------------------------------------
+        c2 = tk.Frame(scroll_frame, bg="#F0F9FF", relief=tk.SOLID, bd=1, padx=12, pady=10)
+        c2.pack(fill=tk.X, padx=4, pady=(0, 10))
+
+        tk.Label(c2, text="2. Official USB Token Drivers Download & Technical Support", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 2))
+        tk.Label(c2, text="Download verified drivers for ePass2003, mToken, ProxKey, InnaIT or get instant technical support:", font=get_sys_font(8), fg="#0284C7", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 6))
+
+        c2_btn_row = tk.Frame(c2, bg="#F0F9FF")
+        c2_btn_row.pack(fill=tk.X)
+        ttk.Button(c2_btn_row, text="🌐 Download Token Drivers Online", style="Primary3D.TButton", command=self._open_driver_download).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(c2_btn_row, text="💬 WhatsApp Support (+91 7016797720)", style="Tool3D.TButton", command=self._open_whatsapp_support).pack(side=tk.LEFT, padx=3)
+        ttk.Button(c2_btn_row, text="📧 Email: sales@a-b-infotech.in", style="Tool3D.TButton", command=self._open_email_support).pack(side=tk.LEFT, padx=3)
+
+        # ----------------------------------------------------
+        # SECTION 3: Register Custom Token Driver (PKCS#11)
+        # ----------------------------------------------------
+        ext = ".dll" if CURRENT_OS == 'Windows' else (".dylib" if CURRENT_OS == 'Darwin' else ".so")
+        c3 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c3.pack(fill=tk.X, padx=4, pady=(0, 10))
+
+        tk.Label(c3, text="3. Register Custom Token Driver (PKCS#11)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        f_grid = tk.Frame(c3, bg="#FFFFFF"); f_grid.pack(fill=tk.X, pady=4)
 
         tk.Label(f_grid, text="Token Name:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=3)
         ttk.Entry(f_grid, textvariable=self.driver_name_var, width=28, font=get_sys_font(8)).grid(row=0, column=1, sticky="w", padx=6, pady=3)
@@ -1577,9 +2039,104 @@ class SettingsDialog:
         ttk.Entry(p_row, textvariable=self.driver_path_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(p_row, text="Browse...", style="Tool3D.TButton", command=self._browse_driver).pack(side=tk.LEFT, padx=(4, 0))
 
-        btn_box = tk.Frame(c, bg="#FFFFFF"); btn_box.pack(anchor=tk.W, pady=(6, 2))
+        btn_box = tk.Frame(c3, bg="#FFFFFF"); btn_box.pack(anchor=tk.W, pady=(6, 2))
         ttk.Button(btn_box, text="➕ Add & Save Driver", style="Primary3D.TButton", command=self._add_driver).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btn_box, text="🛠️ Driver Setup Shortcuts & Tools", style="Tool3D.TButton", command=self.main_app.show_driver_shortcuts_dialog).pack(side=tk.LEFT)
+
+        # ----------------------------------------------------
+        # SECTION 4: Installed Token Management Utilities (1-Click Launchers)
+        # ----------------------------------------------------
+        c4 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c4.pack(fill=tk.X, padx=4, pady=(0, 6))
+
+        tk.Label(c4, text="4. Installed Token Management Utilities (1-Click Launchers)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        c4_grid = tk.Frame(c4, bg="#FFFFFF"); c4_grid.pack(fill=tk.X)
+        ttk.Button(c4_grid, text="🚀 Launch ePass2003 Manager", style="Tool3D.TButton", command=self._launch_epass).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c4_grid, text="🚀 Launch mToken / CryptoID", style="Tool3D.TButton", command=self._launch_mtoken).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(c4_grid, text="🚀 Launch Watchdata PROXKey", style="Tool3D.TButton", command=self._launch_proxkey).grid(row=0, column=2, sticky="ew", padx=3, pady=3)
+        c4_grid.columnconfigure(0, weight=1)
+        c4_grid.columnconfigure(1, weight=1)
+        c4_grid.columnconfigure(2, weight=1)
+
+    def _open_devmgmt(self):
+        if CURRENT_OS == 'Windows':
+            try: subprocess.Popen(["devmgmt.msc"], shell=True)
+            except Exception as e: messagebox.showerror("Error", str(e), parent=self.dialog)
+        else: messagebox.showinfo("Info", "Device Manager is a Windows system tool.", parent=self.dialog)
+
+    def _open_certmgr_user(self):
+        if CURRENT_OS == 'Windows':
+            try: subprocess.Popen(["certmgr.msc"], shell=True)
+            except Exception as e: messagebox.showerror("Error", str(e), parent=self.dialog)
+        else: messagebox.showinfo("Info", "Certificate Manager is a Windows system tool.", parent=self.dialog)
+
+    def _open_certmgr_machine(self):
+        if CURRENT_OS == 'Windows':
+            try: subprocess.Popen(["certlm.msc"], shell=True)
+            except Exception as e: messagebox.showerror("Error", str(e), parent=self.dialog)
+        else: messagebox.showinfo("Info", "Machine Certificate Manager is a Windows system tool.", parent=self.dialog)
+
+    def _restart_scardsvr(self):
+        if CURRENT_OS != 'Windows':
+            messagebox.showinfo("Notice", "Smart Card Service restart is only applicable on Windows.", parent=self.dialog)
+            return
+        try:
+            cmd = 'powershell -Command "Restart-Service -Name SCardSvr -Force -ErrorAction SilentlyContinue"'
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if res.returncode == 0:
+                messagebox.showinfo("Success", "Windows Smart Card Service (SCardSvr) restarted successfully!\nYour USB token should now be detected.", parent=self.dialog)
+            else:
+                messagebox.showwarning("Notice", "Smart Card Service command completed. Please re-insert your USB token.", parent=self.dialog)
+            if self.main_app:
+                self.main_app.load_token_certificates()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to restart service: {e}", parent=self.dialog)
+
+    def _launch_epass(self):
+        paths = [
+            r"C:\Program Files (x86)\ePass2003-India-Auto\ePass2003_India_Auto.exe",
+            r"C:\Program Files\EnterSafe\ePass2003\eps2003.exe",
+            r"C:\Program Files (x86)\EnterSafe\ePass2003\eps2003.exe",
+            r"C:\Program Files (x86)\Professional Digisign Private Limited\ProdigiSignStore\eps2003.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                subprocess.Popen([p]); return
+        if messagebox.askyesno("Not Found", "ePass2003 Manager not found. Open driver download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _launch_mtoken(self):
+        paths = [
+            r"C:\Program Files (x86)\mToken\mToken.exe",
+            r"C:\Program Files\mToken\mToken.exe",
+            r"C:\Program Files (x86)\CryptoID\CryptoID.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                subprocess.Popen([p]); return
+        if messagebox.askyesno("Not Found", "mToken / CryptoID Utility not found. Open download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _launch_proxkey(self):
+        paths = [
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdkmgr.exe",
+            r"C:\Program Files (x86)\Watchdata\PROXKey\wdkmgr.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                subprocess.Popen([p]); return
+        if messagebox.askyesno("Not Found", "Watchdata PROXKey Utility not found. Open download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _open_whatsapp_support(self):
+        msg = urllib.parse.quote("Hello A B INFOTECH Team, I need technical assistance with Token Driver Setup & Digital Signatures.")
+        webbrowser.open(f"https://wa.me/917016797720?text={msg}")
+
+    def _open_email_support(self):
+        subj = urllib.parse.quote("Technical Support: Token Driver Setup")
+        webbrowser.open(f"mailto:sales@a-b-infotech.in?subject={subj}")
+
+    def _open_driver_download(self):
+        webbrowser.open("https://a-b-infotech.in/download?cat=T")
 
     def _browse_driver(self):
         exts = [("DLL Libraries", "*.dll")] if CURRENT_OS == 'Windows' else [("Shared Libraries", "*.dylib;*.so")]
@@ -1625,7 +2182,11 @@ class VisualPdfSignerApp:
         self.sign_tsa_var = tk.StringVar(value="DigiCert TSA (Recommended)")
         self.sign_all_pages_var = tk.BooleanVar(value=True)
 
-        self.signature_areas = []
+        # Custom Logo & Password Protection settings
+        self.sign_custom_logo_path = tk.StringVar(value="")
+        self.sign_include_logo = tk.BooleanVar(value=False)
+        self.sign_protect_pdf = tk.BooleanVar(value=False)
+        self.sign_pdf_password = tk.StringVar(value="")
         self.loaded_certs = []
         self.bulk_mode = False
         self.bulk_in_dir = None
@@ -1746,8 +2307,8 @@ class VisualPdfSignerApp:
             return
 
         if user_key == "ABI-MASTER-PASS":
-            LicenseManager.save_license(user_key, "never", tier="enterprise", ocr_enabled=1, edit_enabled=1)
-            messagebox.showinfo("Success", "Developer Bypass Activated! Enterprise Edition Unlocked.")
+            LicenseManager.save_license(user_key, "never", tier="pro")
+            messagebox.showinfo("Success", "Developer Bypass Activated! Pro Edition Unlocked.")
             self.act_win.destroy()
             self.just_activated = True
             self._init_app_interface()
@@ -1845,8 +2406,8 @@ class VisualPdfSignerApp:
         tk.Label(title_box, text="— PDF Sign & All-in-One Power Suite", font=get_sys_font(10), fg="#BFDBFE", bg="#1E3A8A").pack(side=tk.LEFT, padx=(6, 8))
 
         tier_lbl = LicenseManager.get_tier_label()
-        badge_fg = "#10B981" if tier_lbl in ["Pro", "Enterprise"] else "#F59E0B"
-        badge_bg = "#064E3B" if tier_lbl in ["Pro", "Enterprise"] else "#78350F"
+        badge_fg = "#10B981" if tier_lbl == "Pro" else "#F59E0B"
+        badge_bg = "#064E3B" if tier_lbl == "Pro" else "#78350F"
         lic_badge = tk.Label(title_box, text=f"v2.0 {tier_lbl.upper()} SUITE", font=get_sys_font(8, "bold"), fg=badge_fg, bg=badge_bg, padx=6, pady=2, relief=tk.SOLID, bd=1)
         lic_badge.pack(side=tk.LEFT)
 
@@ -1890,15 +2451,39 @@ class VisualPdfSignerApp:
         self.notebook.add(self.tab_tools, text=" 🛠️ PDF Tools ")
         self._build_tab_tools(self.tab_tools)
 
-        # 6. 📖 OCR & Edit Tab (Full Virtual Display Interactive Text Editor)
+        # 6. 📖 OCR & Edit Tab (Full Virtual Display Interactive Text Editor - Pro Only)
         self.tab_ocr_edit = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
+        if LicenseManager.is_pro():
+            self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
         self._build_tab_ocr_edit(self.tab_ocr_edit)
 
         # 7. ℹ️ About & License
         self.tab_about = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_about, text=" ℹ️ About & License ")
         self._build_tab_about(self.tab_about)
+
+    def apply_feature_gating(self):
+        """Dynamically update UI features based on active license tier (Basic vs Pro)."""
+        is_pro = LicenseManager.is_pro()
+        tabs = self.notebook.tabs()
+        if is_pro:
+            if str(self.tab_ocr_edit) not in tabs:
+                about_idx = -1
+                for idx, t in enumerate(tabs):
+                    if t == str(self.tab_about):
+                        about_idx = idx
+                        break
+                if about_idx >= 0:
+                    self.notebook.insert(about_idx, self.tab_ocr_edit, text=" 📖 OCR & Edit ")
+                else:
+                    self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
+            if hasattr(self, 'btn_signature_settings') and not self.btn_signature_settings.winfo_ismapped():
+                self.btn_signature_settings.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        else:
+            if str(self.tab_ocr_edit) in tabs:
+                self.notebook.forget(self.tab_ocr_edit)
+            if hasattr(self, 'btn_signature_settings') and self.btn_signature_settings.winfo_ismapped():
+                self.btn_signature_settings.pack_forget()
 
     # =========================================================================
     # TAB 1: ✍️ SIGN PDF (Restored Classic Split Layout with Live Canvas)
@@ -1977,8 +2562,11 @@ class VisualPdfSignerApp:
         action_row = tk.Frame(left_panel, bg="#FFFFFF")
         action_row.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Button(action_row, text="⚙️ Signature Settings", style="Tool3D.TButton", command=self.open_signature_settings).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(action_row, text="📁 Bulk Sign Folder", style="Tool3D.TButton", command=self.open_batch_dialog).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(4, 0))
+        self.btn_signature_settings = ttk.Button(action_row, text="⚙️ Signature Settings", style="Tool3D.TButton", command=self.open_signature_settings)
+        if LicenseManager.is_pro():
+            self.btn_signature_settings.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self.btn_bulk_sign = ttk.Button(action_row, text="📁 Bulk Sign Folder", style="Tool3D.TButton", command=self.open_batch_dialog)
+        self.btn_bulk_sign.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(4, 0))
 
         # Bottom Big Signing Button
         bot_f = tk.Frame(left_panel, bg="#FFFFFF")
@@ -2412,12 +3000,14 @@ class VisualPdfSignerApp:
         key_val = lic_info.get("key") or "Not Installed"
         hw_id = LicenseManager.get_hardware_id()
         tier_val = lic_info.get("tier", "pro").capitalize()
-        ocr_stat = "Unlocked (Pro/Enterprise)" if lic_info.get("ocr_enabled") else "Locked (Upgrade Required)"
+        ocr_stat = "Included (Pro Suite)" if LicenseManager.is_pro() else "Not Included (Basic Suite - Upgrade to Pro)"
+        sig_stat = "Full Custom Settings, Logo & AES Password (Pro)" if LicenseManager.is_pro() else "Standard Digital Signing (Basic)"
 
         tk.Label(card2, text=f"• Machine / Hardware ID: {hw_id}", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
         tk.Label(card2, text=f"• License Key: {key_val}", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
-        tk.Label(card2, text=f"• License Edition / Variant: {tier_val} Edition", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
-        tk.Label(card2, text=f"• PDF OCR & Edit Features: {ocr_stat}", font=get_sys_font(8), fg="#047857" if lic_info.get("ocr_enabled") else "#D97706", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• License Edition: {tier_val} Edition", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• Adobe/PDFelement-style OCR & Editor: {ocr_stat}", font=get_sys_font(8), fg="#047857" if LicenseManager.is_pro() else "#D97706", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• Signature Customization & Security: {sig_stat}", font=get_sys_font(8), fg="#047857" if LicenseManager.is_pro() else "#D97706", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
         tk.Label(card2, text=f"• Expiry Date: {exp_date}", font=get_sys_font(8, "bold"), fg="#047857" if exp_date != "expired" else "#DC2626", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
         tk.Label(card2, text=f"• Technical Support: WhatsApp +91 7016797720  |  Email: sales@a-b-infotech.in", font=get_sys_font(8), fg="#0284C7", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
         tk.Label(card2, text=f"• Platform: {CURRENT_OS} ({platform.machine()})", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
@@ -2555,6 +3145,8 @@ class VisualPdfSignerApp:
             contact = self.sign_contact_var.get()
             tsa = TSA_URL if "DigiCert" in self.sign_tsa_var.get() else None
 
+            custom_logo = self.sign_custom_logo_path.get() if (self.sign_include_logo.get() and self.sign_custom_logo_path.get()) else None
+
             if is_token:
                 lib = pkcs11.lib(driver_path)
                 token = None
@@ -2572,12 +3164,26 @@ class VisualPdfSignerApp:
                     if not cert_id: raise ValueError("Certificate not found in token.")
                     signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
 
-                    visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact)
+                    visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact, logo_path=custom_logo)
                     self._pyhanko_sign_incremental(visual_pdf, out_p, signer, areas, tsa)
             else:
                 signer, cert_parsed = load_pfx_certificate(pfx_path, pfx_pass)
-                visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact)
+                visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact, logo_path=custom_logo)
                 self._pyhanko_sign_incremental(visual_pdf, out_p, signer, areas, tsa)
+
+            # Optional AES-256 Document Encryption & Password Protection
+            if self.sign_protect_pdf.get():
+                pwd = self.sign_pdf_password.get().strip()
+                if pwd:
+                    try:
+                        doc = fitz.open(out_p)
+                        tmp_enc = out_p + ".enc.pdf"
+                        doc.save(tmp_enc, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw=pwd, owner_pw=pwd)
+                        doc.close()
+                        os.replace(tmp_enc, out_p)
+                        logger.info(f"Signed PDF successfully encrypted with AES-256 password: {out_p}")
+                    except Exception as enc_err:
+                        logger.error(f"Failed to apply AES-256 password encryption: {enc_err}")
 
             self.root.after(0, lambda: self._on_sign_success(out_p))
         except Exception as e:
