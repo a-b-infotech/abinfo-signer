@@ -163,6 +163,44 @@ def load_abinfotech_logo(max_size=(160, 140)):
     except Exception:
         return None
 
+def apply_app_icon(window):
+    """
+    Apply high-res A B INFOTECH icon to any Tk / Toplevel window across Windows/Linux/Mac.
+    Replaces default Tkinter feather/quill icon everywhere.
+    """
+    if not window:
+        return
+    try:
+        ico_candidates = [
+            os.path.join(APP_DIR, "app_icon.ico"),
+            os.path.join(APP_DIR, "icon.ico"),
+            os.path.join(os.path.dirname(__file__), "app_icon.ico") if "__file__" in globals() else None,
+            os.path.join(os.getcwd(), "app_icon.ico"),
+            os.path.join(os.getcwd(), "icon.ico"),
+        ]
+        target_ico = next((c for c in ico_candidates if c and os.path.exists(c)), None)
+        if target_ico and CURRENT_OS == 'Windows':
+            window.iconbitmap(target_ico)
+    except Exception as e:
+        logger.debug(f"apply_app_icon iconbitmap error: {e}")
+
+    try:
+        png_candidates = [
+            os.path.join(APP_DIR, "image_546aa0.png"),
+            os.path.join(os.path.dirname(__file__), "image_546aa0.png") if "__file__" in globals() else None,
+            os.path.join(os.getcwd(), "image_546aa0.png"),
+            os.path.join(APP_DIR, "app_icon.png"),
+            os.path.join(os.getcwd(), "app_icon.png"),
+        ]
+        target_png = next((p for p in png_candidates if p and os.path.exists(p)), None)
+        if target_png:
+            img = Image.open(target_png)
+            photo = ImageTk.PhotoImage(img)
+            window.iconphoto(False, photo)
+            window._app_window_icon_ref = photo  # keep reference
+    except Exception as e:
+        logger.debug(f"apply_app_icon iconphoto error: {e}")
+
 # ==========================================
 # 0.5. LICENSE MANAGER (CROSS-PLATFORM & TIERED)
 # ==========================================
@@ -385,7 +423,173 @@ TSA_URL = "http://timestamp.digicert.com"
 # ==========================================
 # 1.5. CRYPTOGRAPHIC SIGNING & REPORTLAB OVERLAY
 # ==========================================
+def pdf_has_digital_signatures(pdf_input):
+    """
+    Check whether a PDF file or byte stream contains existing cryptographic digital signatures.
+    """
+    try:
+        data = b""
+        if isinstance(pdf_input, (str, os.PathLike)):
+            if not os.path.exists(pdf_input):
+                return False
+            with open(pdf_input, 'rb') as f:
+                data = f.read()
+        elif isinstance(pdf_input, (bytes, bytearray)):
+            data = bytes(pdf_input)
+        elif hasattr(pdf_input, 'read'):
+            pos = pdf_input.tell() if hasattr(pdf_input, 'tell') else 0
+            data = pdf_input.read()
+            if hasattr(pdf_input, 'seek'):
+                pdf_input.seek(pos)
+
+        if not data:
+            return False
+
+        # Fast byte check for PDF signature dictionaries
+        if b"/ByteRange" in data and (b"/Type /Sig" in data or b"/Type/Sig" in data or b"/SubFilter" in data):
+            return True
+
+        # PyHanko embedded signatures check
+        try:
+            r = PdfFileReader(io.BytesIO(data))
+            if len(r.embedded_signatures) > 0:
+                return True
+        except Exception:
+            pass
+
+        # PyMuPDF sigflags check
+        try:
+            doc = fitz.open(stream=data, filetype="pdf")
+            has_sig = doc.get_sigflags() > 0
+            doc.close()
+            if has_sig:
+                return True
+        except Exception:
+            pass
+
+        return False
+    except Exception:
+        return False
+
+def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None):
+    """
+    Draw visual signature stamp directly and incrementally on the PDF using PyMuPDF,
+    preserving 100% of original bytes so preexisting digital signatures remain intact!
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tf:
+        tf.write(pdf_bytes)
+        tf_name = tf.name
+
+    try:
+        doc = fitz.open(tf_name)
+        subj = cert.subject.rfc4514_string() if cert else ""
+        def get_f(k):
+            for p in subj.split(','):
+                if p.strip().startswith(k + '='):
+                    return p.split('=', 1)[1].strip()
+            return "N/A"
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        signer_cn = get_f('CN') if cert else "Authorized Signer"
+        lines = [
+            "Digitally signed by:",
+            f"Name:- {signer_cn}"
+        ]
+        for key, label in [('O', 'Organization'), ('OU', 'Unit'), ('C', 'Country'), ('ST', 'State')]:
+            val = get_f(key)
+            if val != "N/A":
+                lines.append(f"{label}:- {val}")
+
+        if reason:
+            lines.append(f"Reason:- {reason}")
+        if location:
+            lines.append(f"Location:- {location}")
+        if contact:
+            lines.append(f"Contact:- {contact}")
+
+        lines.append(f"Date:- {datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')}")
+        full_text = "\n".join(lines)
+
+        for a in areas:
+            p_idx = int(a.get('page', 0))
+            if p_idx >= len(doc):
+                continue
+            page = doc[p_idx]
+            ph = page.rect.height
+
+            ax = float(a['x'])
+            ay_pdf = float(a['y'])
+            aw = float(a['width'])
+            ah = float(a['height'])
+            ay_mupdf = ph - (ay_pdf + ah)
+
+            # 1. Outer Box Border
+            rect = fitz.Rect(ax, ay_mupdf, ax + aw, ay_mupdf + ah)
+            page.draw_rect(rect, color=(0.1, 0.2, 0.3), width=1.2)
+
+            # 2. Custom Logo (if provided)
+            has_logo = False
+            logo_w = 0.0
+            if logo_path and os.path.exists(logo_path):
+                try:
+                    logo_dim = min(aw * 0.28, ah * 0.82)
+                    logo_w = logo_dim
+                    logo_h = logo_dim
+                    logo_x = ax + (aw * 0.03)
+                    logo_y = ay_mupdf + (ah - logo_h) / 2
+                    page.insert_image(fitz.Rect(logo_x, logo_y, logo_x + logo_w, logo_y + logo_h), filename=logo_path)
+                    has_logo = True
+                except Exception as e:
+                    logger.warning(f"PyMuPDF custom logo overlay error: {e}")
+
+            # 3. Background Green Checkmark Watermark
+            tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
+            cx = ax + tick_offset_x + ((aw - tick_offset_x) / 2)
+            cy = ay_mupdf + (ah / 2)
+            s = min(aw - tick_offset_x, ah) * 0.35
+            p1 = fitz.Point(cx - s, cy)
+            p2 = fitz.Point(cx - s * 0.2, cy + s * 0.6)
+            p3 = fitz.Point(cx + s * 0.8, cy - s * 0.8)
+            page.draw_polyline([p1, p2, p3], color=(0.2, 0.7, 0.4), width=aw * 0.045, lineJoin=1)
+
+            # 4. Text Information
+            left_pad = (aw * 0.03) + (logo_w + (aw * 0.04) if has_logo else 0)
+            right_pad = aw * 0.03
+            tx = ax + left_pad
+            ty = ay_mupdf + (ah * 0.06)
+            tw = max(aw - left_pad - right_pad, 20.0)
+            th = max(ah - (ah * 0.12), 10.0)
+
+            f_size = min(tw / (max(len(l) for l in lines) * 0.55), th / (len(lines) * 1.25), 11.0)
+            f_size = max(f_size, 5.5)
+
+            page.insert_textbox(
+                fitz.Rect(tx, ty, tx + tw, ty + th),
+                full_text,
+                fontsize=f_size,
+                fontname="helv",
+                color=(0.05, 0.1, 0.15)
+            )
+
+        doc.save(tf_name, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        doc.close()
+
+        with open(tf_name, 'rb') as f:
+            out_bytes = f.read()
+        return out_bytes
+    finally:
+        if os.path.exists(tf_name):
+            try:
+                os.unlink(tf_name)
+            except Exception:
+                pass
+
 def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None):
+    if pdf_has_digital_signatures(pdf_bytes):
+        logger.info("PDF contains preexisting digital signatures. Using 100% incremental visual overlay to preserve digital signatures intact.")
+        return draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason=reason, location=location, contact=contact, logo_path=logo_path)
+
     subj = cert.subject.rfc4514_string()
     def get_f(k):
         for p in subj.split(','):
@@ -1528,6 +1732,7 @@ class SignatureSettingsDialog:
         self.dialog.geometry("560x600")
         self.dialog.minsize(500, 520)
         self.dialog.transient(parent)
+        apply_app_icon(self.dialog)
         self.app = app
         self.logo_preview_img = None
 
@@ -1663,9 +1868,10 @@ class TokenDriverShortcutsDialog:
     def __init__(self, parent, main_app=None):
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"🛠️ Token Driver Setup & Diagnostic Shortcuts [{CURRENT_OS}]")
-        self.dialog.geometry("720x620")
-        self.dialog.minsize(640, 540)
+        self.dialog.geometry("680x420")
+        self.dialog.minsize(620, 360)
         self.dialog.transient(parent)
+        apply_app_icon(self.dialog)
         self.main_app = main_app
 
         if CURRENT_OS == 'Windows':
@@ -1686,23 +1892,10 @@ class TokenDriverShortcutsDialog:
         tk.Label(header, text="🔌 A B INFOTECH - USB Token Driver Setup & Diagnostic Hub", font=get_sys_font(11, "bold"), fg="#FFFFFF", bg="#1E3A8A").pack(anchor=tk.W)
         tk.Label(header, text="Fast 1-click shortcuts to setup, diagnose, and repair USB Cryptographic Tokens on your computer.", font=get_sys_font(8), fg="#BFDBFE", bg="#1E3A8A").pack(anchor=tk.W, pady=(2, 0))
 
-        c1 = tk.Frame(outer, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
-        c1.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(c1, text="1. Windows System Hardware & Certificate Diagnostics", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
-        tk.Label(c1, text="Use these tools to verify if Windows detects your USB Smart Card Token and certificates correctly:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
-
-        c1_grid = tk.Frame(c1, bg="#FFFFFF")
-        c1_grid.pack(fill=tk.X)
-        ttk.Button(c1_grid, text="🖥️ Open Device Manager (devmgmt.msc)", style="Tool3D.TButton", command=self._open_devmgmt).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
-        ttk.Button(c1_grid, text="📜 Open User Certificates (certmgr.msc)", style="Tool3D.TButton", command=self._open_certmgr_user).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
-        ttk.Button(c1_grid, text="🏢 Open Machine Certificates (certlm.msc)", style="Tool3D.TButton", command=self._open_certmgr_machine).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
-        ttk.Button(c1_grid, text="🔄 Restart Smart Card Service (SCardSvr)", style="Primary3D.TButton", command=self._restart_scardsvr).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
-        c1_grid.columnconfigure(0, weight=1)
-        c1_grid.columnconfigure(1, weight=1)
-
+        # 1. Installed Token Management Utilities (1-Click Launchers)
         c2 = tk.Frame(outer, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
         c2.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(c2, text="2. Installed Token Management Utilities (1-Click Launchers)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c2, text="1. Installed Token Management Utilities (1-Click Launchers)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
         tk.Label(c2, text="Launch the official admin app for your USB token to view certificate details or test PIN:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
 
         c2_grid = tk.Frame(c2, bg="#FFFFFF")
@@ -1714,9 +1907,10 @@ class TokenDriverShortcutsDialog:
         c2_grid.columnconfigure(0, weight=1)
         c2_grid.columnconfigure(1, weight=1)
 
+        # 2. Direct A B INFOTECH Technical Support & Driver Downloads
         c3 = tk.Frame(outer, bg="#F0F9FF", relief=tk.SOLID, bd=1, padx=12, pady=10)
         c3.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(c3, text="3. Direct A B INFOTECH Technical Support & Driver Downloads", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c3, text="2. Direct A B INFOTECH Technical Support & Driver Downloads", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 4))
         tk.Label(c3, text="Need help installing drivers or setting up your hardware token? Our engineers are available:", font=get_sys_font(8), fg="#0284C7", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 6))
 
         c3_btn_row = tk.Frame(c3, bg="#F0F9FF")
@@ -1824,6 +2018,7 @@ class BatchFolderDialog:
         self.dialog.geometry("640x420")
         self.dialog.minsize(580, 380)
         self.dialog.transient(parent)
+        apply_app_icon(self.dialog)
         self.main_app = main_app
 
         self.in_dir_var = tk.StringVar()
@@ -1912,6 +2107,7 @@ class SettingsDialog:
         self.dialog.geometry("740x650")
         self.dialog.minsize(660, 560)
         self.dialog.transient(parent)
+        apply_app_icon(self.dialog)
         self.main_app = main_app
 
         self.driver_name_var = tk.StringVar()
@@ -2041,21 +2237,6 @@ class SettingsDialog:
 
         btn_box = tk.Frame(c3, bg="#FFFFFF"); btn_box.pack(anchor=tk.W, pady=(6, 2))
         ttk.Button(btn_box, text="➕ Add & Save Driver", style="Primary3D.TButton", command=self._add_driver).pack(side=tk.LEFT, padx=(0, 6))
-
-        # ----------------------------------------------------
-        # SECTION 4: Installed Token Management Utilities (1-Click Launchers)
-        # ----------------------------------------------------
-        c4 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
-        c4.pack(fill=tk.X, padx=4, pady=(0, 6))
-
-        tk.Label(c4, text="4. Installed Token Management Utilities (1-Click Launchers)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
-        c4_grid = tk.Frame(c4, bg="#FFFFFF"); c4_grid.pack(fill=tk.X)
-        ttk.Button(c4_grid, text="🚀 Launch ePass2003 Manager", style="Tool3D.TButton", command=self._launch_epass).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
-        ttk.Button(c4_grid, text="🚀 Launch mToken / CryptoID", style="Tool3D.TButton", command=self._launch_mtoken).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
-        ttk.Button(c4_grid, text="🚀 Launch Watchdata PROXKey", style="Tool3D.TButton", command=self._launch_proxkey).grid(row=0, column=2, sticky="ew", padx=3, pady=3)
-        c4_grid.columnconfigure(0, weight=1)
-        c4_grid.columnconfigure(1, weight=1)
-        c4_grid.columnconfigure(2, weight=1)
 
     def _open_devmgmt(self):
         if CURRENT_OS == 'Windows':
@@ -2254,12 +2435,7 @@ class VisualPdfSignerApp:
         )
 
     def _apply_window_icon(self, window):
-        try:
-            target_icon = "app_icon.ico" if os.path.exists("app_icon.ico") else "icon.ico"
-            if os.path.exists(target_icon) and CURRENT_OS == 'Windows':
-                window.iconbitmap(target_icon)
-        except Exception:
-            pass
+        apply_app_icon(window)
 
     def hide_window(self):
         self.root.withdraw()
@@ -2662,6 +2838,18 @@ class VisualPdfSignerApp:
         if not out_p: return
 
         try:
+            if pdf_has_digital_signatures(in_p):
+                import shutil
+                shutil.copyfile(in_p, out_p)
+                self.lbl_compress_res.config(text="✓ Digital signatures detected: PDF preserved 100% intact.", fg="#047857")
+                self.compress_viewer.load_pdf(out_p)
+                messagebox.showinfo(
+                    "Digital Signature Preserved",
+                    f"This PDF contains cryptographic digital signatures.\n\n"
+                    f"To prevent removing or invalidating existing signatures, the document structure was preserved as-is:\n{out_p}"
+                )
+                return
+
             doc = fitz.open(in_p)
             doc.save(out_p, garbage=4, deflate=True)
             doc.close()
@@ -3205,7 +3393,20 @@ class VisualPdfSignerApp:
             x2 = int(area['x'] + area['width'] + offset_x)
             y2 = int(area['y'] + area['height'] + offset_y)
 
-            field_name = f"Signature_{idx+1}"
+            existing_fields = set()
+            try:
+                reader_chk = PdfFileReader(io.BytesIO(current_io.getvalue()))
+                for s in reader_chk.embedded_signatures:
+                    if s.field_name:
+                        existing_fields.add(s.field_name)
+            except Exception:
+                pass
+
+            sig_num = idx + 1
+            while f"Signature_{sig_num}" in existing_fields:
+                sig_num += 1
+            field_name = f"Signature_{sig_num}"
+
             writer = IncrementalPdfFileWriter(current_io)
             append_signature_field(writer, SigFieldSpec(field_name, box=(x1, y1, x2, y2), on_page=p_idx))
 
@@ -3311,19 +3512,86 @@ def main():
     flask_thread.start()
 
     # System Tray Integration
-    if pystray and os.path.exists("icon.ico"):
+    if pystray:
         try:
-            tray_img = Image.open("icon.ico")
-            menu = (
-                item('Open Application', lambda: gui_app.show_window()),
-                item('Driver Shortcuts', lambda: gui_app.show_driver_shortcuts_dialog()),
-                item('WhatsApp Support', lambda: gui_app.open_whatsapp()),
-                item('Exit', lambda: sys.exit(0))
-            )
-            tray_icon = pystray.Icon("abinfo_signer", tray_img, "A B INFOTECH Signer", menu)
-            threading.Thread(target=tray_icon.run, daemon=True).start()
-        except Exception:
-            pass
+            candidates = [
+                os.path.join(APP_DIR, "app_icon.ico"),
+                os.path.join(APP_DIR, "icon.ico"),
+                "app_icon.ico",
+                "icon.ico",
+                "image_546aa0.png",
+                "app_icon.png"
+            ]
+            tray_img_path = next((c for c in candidates if os.path.exists(c)), None)
+            if tray_img_path:
+                tray_img = Image.open(tray_img_path)
+                if tray_img.mode != 'RGBA':
+                    tray_img = tray_img.convert('RGBA')
+
+                def _open_app(icon=None, itm=None):
+                    gui_root.after(0, gui_app.show_window)
+
+                def _nav(tab_attr):
+                    def _handler(icon=None, itm=None):
+                        def _inner():
+                            gui_app.show_window()
+                            try:
+                                if hasattr(gui_app, tab_attr):
+                                    gui_app.notebook.select(getattr(gui_app, tab_attr))
+                            except Exception as e:
+                                logger.debug(f"Tray switch tab error: {e}")
+                        gui_root.after(0, _inner)
+                    return _handler
+
+                def _open_settings(icon=None, itm=None):
+                    gui_root.after(0, lambda: (gui_app.show_window(), gui_app.open_settings_dialog()))
+
+                def _open_shortcuts(icon=None, itm=None):
+                    gui_root.after(0, lambda: (gui_app.show_window(), gui_app.show_driver_shortcuts_dialog()))
+
+                def _open_wa(icon=None, itm=None):
+                    gui_root.after(0, gui_app.open_whatsapp)
+
+                def _open_buy(icon=None, itm=None):
+                    gui_root.after(0, gui_app.open_buy_dsc)
+
+                def _exit_app(icon=None, itm=None):
+                    if icon:
+                        try: icon.stop()
+                        except Exception: pass
+                    gui_root.after(0, lambda: (gui_root.destroy(), os._exit(0)))
+
+                menu_items = [
+                    item('🏠 Open A B INFOTECH Suite', _open_app, default=True),
+                    pystray.Menu.SEPARATOR,
+                    item('✍️ Sign PDF', _nav('tab_sign')),
+                    item('🗜️ Compress PDF', _nav('tab_compress')),
+                    item('📑 Merge PDF', _nav('tab_merge')),
+                    item('🛡️ Verify Signatures', _nav('tab_verify')),
+                    item('🛠️ PDF Tools Suite', _nav('tab_tools')),
+                ]
+                if LicenseManager.is_pro():
+                    menu_items.append(item('📖 OCR & Edit PDF (Pro)', _nav('tab_ocr_edit')))
+                
+                menu_items.extend([
+                    pystray.Menu.SEPARATOR,
+                    item('⚙️ Settings & License', _open_settings),
+                    item('🔌 Token Driver Shortcuts', _open_shortcuts),
+                    item('💬 WhatsApp Support (+91 7016797720)', _open_wa),
+                    item('🛒 Buy DSC / License', _open_buy),
+                    pystray.Menu.SEPARATOR,
+                    item('🚪 Exit Application', _exit_app)
+                ])
+
+                tray_icon = pystray.Icon(
+                    "abinfo_signer",
+                    tray_img,
+                    "A B INFOTECH - PDF Sign & All-in-One Power Suite",
+                    pystray.Menu(*menu_items)
+                )
+                threading.Thread(target=tray_icon.run, daemon=True).start()
+        except Exception as e:
+            logger.warning(f"System tray init failed: {e}")
 
     gui_root.mainloop()
 
