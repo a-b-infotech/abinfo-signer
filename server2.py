@@ -55,12 +55,18 @@ except ImportError:
     print("Please install PyMuPDF and Pillow: pip install PyMuPDF Pillow")
     sys.exit(1)
 
-# Optional OCR library
+# Optional OCR library (Tesseract & Deep-Learning RapidOCR)
 try:
     import pytesseract
     PYTESSERACT_AVAILABLE = True
 except ImportError:
     PYTESSERACT_AVAILABLE = False
+
+try:
+    from rapidocr_onnxruntime import RapidOCR
+    RAPID_OCR_AVAILABLE = True
+except ImportError:
+    RAPID_OCR_AVAILABLE = False
 
 # System Tray Components
 try:
@@ -471,11 +477,177 @@ def pdf_has_digital_signatures(pdf_input):
     except Exception:
         return False
 
-def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None):
+def extract_cert_email_and_address(cert):
+    """
+    Extracts email address and physical postal address from an x509.Certificate object (Token or PFX/P12).
+    - Email: Checks Subject Alternative Name (SAN) for RFC822Name, then Subject DN for emailAddress (1.2.840.113549.1.9.1).
+    - Address: Checks Subject DN for streetAddress (2.5.4.9), localityName (2.5.4.7), stateOrProvinceName (2.5.4.8),
+               postalCode (2.5.4.17), countryName (2.5.4.6).
+    """
+    email = ""
+    address = ""
+    if not cert:
+        return email, address
+
+    try:
+        from cryptography.x509.oid import ExtensionOID, NameOID
+        # 1. Subject Alternative Name (SAN)
+        try:
+            san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+            emails = san.value.get_values_for_type(x509.RFC822Name)
+            if emails:
+                email = str(emails[0]).strip()
+        except Exception:
+            pass
+
+        # Fallback to Subject emailAddress OID (1.2.840.113549.1.9.1)
+        if not email:
+            for attr in cert.subject:
+                if attr.oid == NameOID.EMAIL_ADDRESS or attr.oid.dotted_string == '1.2.840.113549.1.9.1':
+                    email = str(attr.value).strip()
+                    break
+
+        # 2. Extract Address from Subject DN
+        street = ""
+        locality = ""
+        state = ""
+        postal_code = ""
+        country = ""
+
+        for attr in cert.subject:
+            oid_str = attr.oid.dotted_string
+            val = str(attr.value).strip()
+            if attr.oid == NameOID.STREET_ADDRESS or oid_str == '2.5.4.9':
+                street = val
+            elif attr.oid == NameOID.LOCALITY_NAME or oid_str == '2.5.4.7':
+                locality = val
+            elif attr.oid == NameOID.STATE_OR_PROVINCE_NAME or oid_str == '2.5.4.8':
+                state = val
+            elif attr.oid == NameOID.POSTAL_CODE or oid_str == '2.5.4.17':
+                postal_code = val
+            elif attr.oid == NameOID.COUNTRY_NAME or oid_str == '2.5.4.6':
+                country = val
+
+        parts = []
+        if street:
+            parts.append(street)
+        if locality and locality.lower() not in street.lower():
+            parts.append(locality)
+        if state and state.lower() not in street.lower():
+            parts.append(state)
+        if postal_code and postal_code not in street:
+            parts.append(postal_code)
+        if not parts and country:
+            parts.append(country)
+
+        if parts:
+            address = ", ".join(parts)
+    except Exception as e:
+        logger.debug(f"Cert email/address extraction error: {e}")
+
+    return email, address
+
+def get_bbox_bg_color(page, bbox):
+    """
+    Samples the background pixel color around the perimeter of a bounding box on the page.
+    Prevents white redaction rectangles on colored backgrounds (e.g. blue headers, shaded tables).
+    Returns (r, g, b) normalized between 0.0 and 1.0.
+    """
+    try:
+        pix = page.get_pixmap(dpi=150)
+        sx = pix.width / page.rect.width
+        sy = pix.height / page.rect.height
+
+        if hasattr(bbox, 'x0'):
+            x0, y0, x1, y1 = bbox.x0, bbox.y0, bbox.x1, bbox.y1
+        else:
+            x0, y0, x1, y1 = bbox
+
+        sample_pts = [
+            (int(x0 * sx), max(0, int(y0 * sy) - 2)),
+            (int((x0 + x1) / 2 * sx), max(0, int(y0 * sy) - 2)),
+            (min(pix.width - 1, int(x1 * sx)), max(0, int(y0 * sy) - 2)),
+            (max(0, int(x0 * sx) - 2), int((y0 + y1) / 2 * sy)),
+            (min(pix.width - 1, int(x1 * sx) + 2), int((y0 + y1) / 2 * sy)),
+            (int(x0 * sx), min(pix.height - 1, int(y1 * sy) + 2)),
+            (int((x0 + x1) / 2 * sx), min(pix.height - 1, int(y1 * sy) + 2)),
+            (min(pix.width - 1, int(x1 * sx)), min(pix.height - 1, int(y1 * sy) + 2)),
+        ]
+        colors = []
+        for px, py in sample_pts:
+            try:
+                col = pix.pixel(px, py)
+                colors.append(col[:3])
+            except Exception:
+                pass
+
+        if colors:
+            from collections import Counter
+            most_common = Counter(colors).most_common(1)[0][0]
+            return (most_common[0] / 255.0, most_common[1] / 255.0, most_common[2] / 255.0)
+    except Exception as e:
+        logger.debug(f"Failed to sample background color: {e}")
+    return (1.0, 1.0, 1.0)
+
+def sample_text_color_int(pix, box, bg_rgb):
+    """
+    Samples contrasting text pixel color from within the bounding box.
+    Returns RGB integer (e.g. 0x000000 or 0xFFFFFF).
+    """
+    try:
+        bg_int_r = int(bg_rgb[0] * 255)
+        bg_int_g = int(bg_rgb[1] * 255)
+        bg_int_b = int(bg_rgb[2] * 255)
+
+        x0 = int(min(p[0] for p in box))
+        y0 = int(min(p[1] for p in box))
+        x1 = int(max(p[0] for p in box))
+        y1 = int(max(p[1] for p in box))
+
+        contrast_colors = []
+        for x in range(x0 + 1, x1, max(1, (x1 - x0) // 5)):
+            for y in range(y0 + 1, y1, max(1, (y1 - y0) // 3)):
+                if 0 <= x < pix.width and 0 <= y < pix.height:
+                    col = pix.pixel(x, y)[:3]
+                    dist = abs(col[0] - bg_int_r) + abs(col[1] - bg_int_g) + abs(col[2] - bg_int_b)
+                    if dist > 80:
+                        contrast_colors.append(col)
+        if contrast_colors:
+            from collections import Counter
+            c = Counter(contrast_colors).most_common(1)[0][0]
+            return (c[0] << 16) | (c[1] << 8) | c[2]
+    except Exception:
+        pass
+    luminance = (bg_rgb[0] * 0.299 + bg_rgb[1] * 0.587 + bg_rgb[2] * 0.114)
+    return 0xFFFFFF if luminance < 0.5 else 0x000000
+
+_RAPID_OCR_ENGINE = None
+
+def get_rapid_ocr_engine():
+    global _RAPID_OCR_ENGINE
+    if _RAPID_OCR_ENGINE is None and RAPID_OCR_AVAILABLE:
+        try:
+            _RAPID_OCR_ENGINE = RapidOCR()
+        except Exception as e:
+            logger.warning(f"Could not initialize RapidOCR: {e}")
+    return _RAPID_OCR_ENGINE
+
+def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None, appearance_opts=None):
     """
     Draw visual signature stamp directly and incrementally on the PDF using PyMuPDF,
     preserving 100% of original bytes so preexisting digital signatures remain intact!
     """
+    if appearance_opts is None:
+        appearance_opts = {
+            'show_name': True,
+            'show_date': True,
+            'show_reason': True,
+            'show_address': True,
+            'show_issuer': False,
+            'show_tick': True,
+            'show_border': False
+        }
+
     import tempfile
     with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tf:
         tf.write(pdf_bytes)
@@ -492,23 +664,36 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
 
         ist = timezone(timedelta(hours=5, minutes=30))
         signer_cn = get_f('CN') if cert else "Authorized Signer"
-        lines = [
-            "Digitally signed by:",
-            f"Name:- {signer_cn}"
-        ]
-        for key, label in [('O', 'Organization'), ('OU', 'Unit'), ('C', 'Country'), ('ST', 'State')]:
-            val = get_f(key)
-            if val != "N/A":
-                lines.append(f"{label}:- {val}")
 
-        if reason:
+        lines = []
+        if appearance_opts.get('show_name', True):
+            lines.append("Digitally signed by:")
+            lines.append(f"Name:- {signer_cn}")
+
+        if appearance_opts.get('show_issuer', False):
+            issuer_cn = "N/A"
+            if cert:
+                try:
+                    for attr in cert.issuer:
+                        if attr.oid == x509.NameOID.COMMON_NAME:
+                            issuer_cn = attr.value; break
+                except Exception:
+                    pass
+            lines.append(f"Issuer:- {issuer_cn}")
+
+        if appearance_opts.get('show_reason', True) and reason:
             lines.append(f"Reason:- {reason}")
-        if location:
-            lines.append(f"Location:- {location}")
+        if appearance_opts.get('show_address', True) and location:
+            lines.append(f"Address:- {location}")
         if contact:
             lines.append(f"Contact:- {contact}")
 
-        lines.append(f"Date:- {datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')}")
+        if appearance_opts.get('show_date', True):
+            lines.append(f"Date:- {datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')}")
+
+        if not lines:
+            lines = [f"Signed by {signer_cn}"]
+
         full_text = "\n".join(lines)
 
         for a in areas:
@@ -524,9 +709,10 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             ah = float(a['height'])
             ay_mupdf = ph - (ay_pdf + ah)
 
-            # 1. Outer Box Border
-            rect = fitz.Rect(ax, ay_mupdf, ax + aw, ay_mupdf + ah)
-            page.draw_rect(rect, color=(0.1, 0.2, 0.3), width=1.2)
+            # 1. Outer Box Border (only if show_border is True)
+            if appearance_opts.get('show_border', False):
+                rect = fitz.Rect(ax, ay_mupdf, ax + aw, ay_mupdf + ah)
+                page.draw_rect(rect, color=(0.1, 0.2, 0.3), width=1.2)
 
             # 2. Custom Logo (if provided)
             has_logo = False
@@ -543,15 +729,16 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
                 except Exception as e:
                     logger.warning(f"PyMuPDF custom logo overlay error: {e}")
 
-            # 3. Background Green Checkmark Watermark
-            tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
-            cx = ax + tick_offset_x + ((aw - tick_offset_x) / 2)
-            cy = ay_mupdf + (ah / 2)
-            s = min(aw - tick_offset_x, ah) * 0.35
-            p1 = fitz.Point(cx - s, cy)
-            p2 = fitz.Point(cx - s * 0.2, cy + s * 0.6)
-            p3 = fitz.Point(cx + s * 0.8, cy - s * 0.8)
-            page.draw_polyline([p1, p2, p3], color=(0.2, 0.7, 0.4), width=aw * 0.045, lineJoin=1)
+            # 3. Background Green Checkmark Watermark (only if show_tick is True)
+            if appearance_opts.get('show_tick', True):
+                tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
+                cx = ax + tick_offset_x + ((aw - tick_offset_x) / 2)
+                cy = ay_mupdf + (ah / 2)
+                s = min(aw - tick_offset_x, ah) * 0.35
+                p1 = fitz.Point(cx - s, cy)
+                p2 = fitz.Point(cx - s * 0.2, cy + s * 0.6)
+                p3 = fitz.Point(cx + s * 0.8, cy - s * 0.8)
+                page.draw_polyline([p1, p2, p3], color=(0.2, 0.7, 0.4), width=max(1.5, aw * 0.045), lineJoin=1)
 
             # 4. Text Information
             left_pad = (aw * 0.03) + (logo_w + (aw * 0.04) if has_logo else 0)
@@ -585,12 +772,23 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             except Exception:
                 pass
 
-def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None):
+def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None, appearance_opts=None):
     if pdf_has_digital_signatures(pdf_bytes):
         logger.info("PDF contains preexisting digital signatures. Using 100% incremental visual overlay to preserve digital signatures intact.")
-        return draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason=reason, location=location, contact=contact, logo_path=logo_path)
+        return draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason=reason, location=location, contact=contact, logo_path=logo_path, appearance_opts=appearance_opts)
 
-    subj = cert.subject.rfc4514_string()
+    if appearance_opts is None:
+        appearance_opts = {
+            'show_name': True,
+            'show_date': True,
+            'show_reason': True,
+            'show_address': True,
+            'show_issuer': False,
+            'show_tick': True,
+            'show_border': False
+        }
+
+    subj = cert.subject.rfc4514_string() if cert else ""
     def get_f(k):
         for p in subj.split(','):
             if p.strip().startswith(k + '='):
@@ -598,24 +796,36 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
         return "N/A"
 
     ist = timezone(timedelta(hours=5, minutes=30))
-    signer_cn = get_f('CN')
-    lines = [
-        "Digitally signed by:",
-        f"Name:- {signer_cn}"
-    ]
-    for key, label in [('O', 'Organization'), ('OU', 'Unit'), ('C', 'Country'), ('ST', 'State')]:
-        val = get_f(key)
-        if val != "N/A":
-            lines.append(f"{label}:- {val}")
+    signer_cn = get_f('CN') if cert else "Authorized Signer"
 
-    if reason:
+    lines = []
+    if appearance_opts.get('show_name', True):
+        lines.append("Digitally signed by:")
+        lines.append(f"Name:- {signer_cn}")
+
+    if appearance_opts.get('show_issuer', False):
+        issuer_cn = "N/A"
+        if cert:
+            try:
+                for attr in cert.issuer:
+                    if attr.oid == x509.NameOID.COMMON_NAME:
+                        issuer_cn = attr.value; break
+            except Exception:
+                pass
+        lines.append(f"Issuer:- {issuer_cn}")
+
+    if appearance_opts.get('show_reason', True) and reason:
         lines.append(f"Reason:- {reason}")
-    if location:
-        lines.append(f"Location:- {location}")
+    if appearance_opts.get('show_address', True) and location:
+        lines.append(f"Address:- {location}")
     if contact:
         lines.append(f"Contact:- {contact}")
 
-    lines.append(f"Date:- {datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')}")
+    if appearance_opts.get('show_date', True):
+        lines.append(f"Date:- {datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')}")
+
+    if not lines:
+        lines = [f"Signed by {signer_cn}"]
 
     reader = PdfReader(io.BytesIO(pdf_bytes))
     writer = PdfWriter()
@@ -639,10 +849,11 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 aw = float(area['width'])
                 ah = float(area['height'])
 
-                # Signature outer box border
-                c.setStrokeColorRGB(0.1, 0.2, 0.3)
-                c.setLineWidth(1.2)
-                c.rect(ax, ay, aw, ah)
+                # Signature outer box border (only if show_border is True)
+                if appearance_opts.get('show_border', False):
+                    c.setStrokeColorRGB(0.1, 0.2, 0.3)
+                    c.setLineWidth(1.2)
+                    c.rect(ax, ay, aw, ah)
 
                 # Draw custom logo if provided
                 has_logo = False
@@ -660,17 +871,18 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                         logger.warning(f"ReportLab custom logo error: {e}")
                         has_logo = False
 
-                # Background watermark green checkmark
-                c.setStrokeColor(Color(0.2, 0.7, 0.4, alpha=0.35))
-                c.setLineWidth(aw * 0.06)
-                c.setLineJoin(1)
-                tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
-                cx, cy, s = ax + tick_offset_x + ((aw - tick_offset_x) / 2), ay + (ah / 2), min(aw - tick_offset_x, ah) * 0.35
-                p = c.beginPath()
-                p.moveTo(cx - s, cy)
-                p.lineTo(cx - s * 0.2, cy - s * 0.6)
-                p.lineTo(cx + s * 0.8, cy + s * 0.8)
-                c.drawPath(p, 1, 0)
+                # Background watermark green checkmark (only if show_tick is True)
+                if appearance_opts.get('show_tick', True):
+                    c.setStrokeColor(Color(0.2, 0.7, 0.4, alpha=0.35))
+                    c.setLineWidth(max(1.5, aw * 0.06))
+                    c.setLineJoin(1)
+                    tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
+                    cx, cy, s = ax + tick_offset_x + ((aw - tick_offset_x) / 2), ay + (ah / 2), min(aw - tick_offset_x, ah) * 0.35
+                    p = c.beginPath()
+                    p.moveTo(cx - s, cy)
+                    p.lineTo(cx - s * 0.2, cy - s * 0.6)
+                    p.lineTo(cx + s * 0.8, cy + s * 0.8)
+                    c.drawPath(p, 1, 0)
 
                 # Text positioning on right of logo
                 left_pad = (aw * 0.03) + (logo_w + (aw * 0.04) if has_logo else 0)
@@ -832,7 +1044,7 @@ class EmbeddedPdfViewer(tk.Frame):
     - Zoom In (+), Zoom Out (-), Fit Page
     - Interactive Signature Area Box selection (crosshair cursor drag-and-drop)
     """
-    def __init__(self, parent, on_area_selected=None, allow_drawing=False, bg="#F8FAFC"):
+    def __init__(self, parent, on_area_selected=None, allow_drawing=False, bg="#F8FAFC", on_clear=None):
         super().__init__(parent, bg=bg)
         self.doc = None
         self.pdf_path = None
@@ -840,6 +1052,7 @@ class EmbeddedPdfViewer(tk.Frame):
         self.scale = 1.35
         self.on_area_selected = on_area_selected
         self.allow_drawing = allow_drawing
+        self.on_clear = on_clear
         self.drawing_mode = False
         self.start_x = 0
         self.start_y = 0
@@ -942,6 +1155,11 @@ class EmbeddedPdfViewer(tk.Frame):
         if self.allow_drawing:
             self.btn_draw.config(state=tk.DISABLED, text="✏️ Draw Signature Box")
             self.drawing_mode = False
+        if self.on_clear:
+            try:
+                self.on_clear()
+            except Exception as e:
+                logger.debug(f"Viewer on_clear error: {e}")
 
     def render_page(self):
         if not self.doc or len(self.doc) == 0:
@@ -1141,7 +1359,8 @@ class PdfVirtualEditor(tk.Frame):
         toolbar = tk.Frame(self, bg="#E2E8F0", padx=8, pady=4, relief=tk.RAISED, bd=1)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        ttk.Button(toolbar, text="📂 Open PDF", style="Primary3D.TButton", command=self.open_pdf).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="📂 Open PDF", style="Primary3D.TButton", command=self.open_pdf).pack(side=tk.LEFT, padx=3)
+        ttk.Button(toolbar, text="❌ Clear PDF", style="Tool3D.TButton", command=self.clear_pdf).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="◀ Prev", style="Tool3D.TButton", command=self.prev_page).pack(side=tk.LEFT, padx=2)
         self.lbl_page = tk.Label(toolbar, text="Page: 0 / 0", font=get_sys_font(8, "bold"), fg="#1E293B", bg="#E2E8F0")
         self.lbl_page.pack(side=tk.LEFT, padx=6)
@@ -1388,7 +1607,7 @@ class PdfVirtualEditor(tk.Frame):
         for item in self.tree_spans.get_children():
             self.tree_spans.delete(item)
 
-        # Extract text blocks and spans with exact bounding boxes
+        # 1. Extract vector text blocks and spans with exact bounding boxes
         text_dict = page.get_text("dict")
         raw_spans = []
         for b in text_dict.get("blocks", []):
@@ -1397,11 +1616,12 @@ class PdfVirtualEditor(tk.Frame):
                     for s in l.get("spans", []):
                         txt = s.get("text", "").strip()
                         if txt:
+                            s["bg_rgb"] = get_bbox_bg_color(page, s.get("bbox", (0, 0, 0, 0)))
                             raw_spans.append(s)
 
-        # Scanned page fallback
+        # 2. Deep-learning multilingual OCR fallback for scanned/image pages
         if not raw_spans:
-            raw_spans = self._extract_scanned_page_text(page)
+            raw_spans = self._extract_ocr_page_text(page)
 
         self.spans = raw_spans
         for idx, s in enumerate(self.spans):
@@ -1410,23 +1630,75 @@ class PdfVirtualEditor(tk.Frame):
         if self.editor_mode == "edit":
             self._draw_span_overlays()
 
-    def _extract_scanned_page_text(self, page):
+    def _extract_ocr_page_text(self, page):
+        """
+        Multilingual OCR extraction using RapidOCR on rendered page pixmap.
+        Detects exact text blocks, word positions, and bounding coordinates from images.
+        """
         res = []
+        ocr = get_rapid_ocr_engine()
+        if not ocr:
+            try:
+                blocks = page.get_text("blocks")
+                for b in blocks:
+                    t = b[4].strip()
+                    if t:
+                        res.append({
+                            "text": t,
+                            "bbox": b[:4],
+                            "origin": (b[0], b[3] - 2),
+                            "font": "Helvetica",
+                            "size": 10.0,
+                            "color": 0,
+                            "bg_rgb": get_bbox_bg_color(page, b[:4])
+                        })
+            except Exception as e:
+                logger.warning(f"Fallback scan text error: {e}")
+            return res
+
         try:
-            blocks = page.get_text("blocks")
-            for b in blocks:
-                t = b[4].strip()
-                if t:
-                    res.append({
-                        "text": t,
-                        "bbox": b[:4],
-                        "origin": (b[0], b[3] - 2),
-                        "font": "Helvetica",
-                        "size": 10.0,
-                        "color": 0
-                    })
+            import numpy as np
+            pix = page.get_pixmap(dpi=150)
+            np_img = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
+            ocr_results, _ = ocr(np_img)
+            if not ocr_results:
+                return res
+
+            sx = page.rect.width / pix.width
+            sy = page.rect.height / pix.height
+
+            for item in ocr_results:
+                box = item[0]
+                text = str(item[1]).strip()
+                if not text:
+                    continue
+                score = float(item[2]) if len(item) > 2 else 1.0
+                if score < 0.25:
+                    continue
+
+                x0 = min(p[0] for p in box) * sx
+                y0 = min(p[1] for p in box) * sy
+                x1 = max(p[0] for p in box) * sx
+                y1 = max(p[1] for p in box) * sy
+                h = max(y1 - y0, 6.0)
+                f_size = max(7.0, round(h * 0.72))
+                origin = (x0, y1 - 2)
+
+                bg_rgb = get_bbox_bg_color(page, (x0, y0, x1, y1))
+                txt_col = sample_text_color_int(pix, box, bg_rgb)
+
+                res.append({
+                    "text": text,
+                    "bbox": (x0, y0, x1, y1),
+                    "origin": origin,
+                    "font": "Helvetica",
+                    "size": float(f_size),
+                    "color": txt_col,
+                    "bg_rgb": bg_rgb,
+                    "is_ocr": True
+                })
         except Exception as e:
-            logger.warning(f"Fallback scan text error: {e}")
+            logger.error(f"RapidOCR page text extraction error: {e}")
         return res
 
     def recognize_ocr(self):
@@ -1434,9 +1706,25 @@ class PdfVirtualEditor(tk.Frame):
             messagebox.showwarning("Warning", "Please open a PDF document first.")
             return
         page = self.doc[self.current_page]
-        self.scan_and_detect_text()
-        count = len(self.spans)
-        messagebox.showinfo("OCR Complete", f"Recognized {count} text elements and blocks on Page {self.current_page + 1}.\nYou can now click on any text block on the canvas to edit!")
+        ocr_spans = self._extract_ocr_page_text(page)
+        if ocr_spans:
+            self.spans = ocr_spans
+            for item in self.tree_spans.get_children():
+                self.tree_spans.delete(item)
+            for idx, s in enumerate(self.spans):
+                self.tree_spans.insert("", tk.END, iid=str(idx), values=(s.get("text", "")[:45],))
+            if self.editor_mode == "edit":
+                self._draw_span_overlays()
+            count = len(self.spans)
+            messagebox.showinfo(
+                "OCR Complete",
+                f"✓ High-level multilingual OCR successfully recognized {count} text blocks on Page {self.current_page + 1}.\n\n"
+                f"You can now click directly on any text block on the canvas to edit, format, or redact!"
+            )
+        else:
+            self.scan_and_detect_text()
+            count = len(self.spans)
+            messagebox.showinfo("OCR Complete", f"Recognized {count} text elements on Page {self.current_page + 1}.")
 
     def _draw_span_overlays(self):
         self.canvas.delete("span_box")
@@ -1642,8 +1930,12 @@ class PdfVirtualEditor(tk.Frame):
         bbox = fitz.Rect(s["bbox"])
 
         try:
-            # 1. Whiteout / Redact old text
-            page.add_redact_annot(bbox, fill=(1, 1, 1))
+            # 1. Seamless in-place redaction matching background pixel color
+            bg_rgb = s.get("bg_rgb")
+            if not bg_rgb:
+                bg_rgb = get_bbox_bg_color(page, bbox)
+
+            page.add_redact_annot(bbox, fill=bg_rgb)
             page.apply_redactions()
 
             # 2. Compute typography
@@ -1656,7 +1948,7 @@ class PdfVirtualEditor(tk.Frame):
             color_rgb = self._get_target_color_rgb()
             origin = s.get("origin", (bbox.x0, bbox.y1 - 2))
 
-            # 3. Insert replacement text at exact location
+            # 3. Insert replacement text at exact location matching baseline and font
             page.insert_text(fitz.Point(origin[0], origin[1]), new_text, fontname=f_target, fontsize=f_size, color=color_rgb)
 
             # Re-render & scan
@@ -1676,7 +1968,8 @@ class PdfVirtualEditor(tk.Frame):
         bbox = fitz.Rect(s["bbox"])
 
         try:
-            page.add_redact_annot(bbox, fill=(1, 1, 1))
+            bg_rgb = s.get("bg_rgb") or get_bbox_bg_color(page, bbox)
+            page.add_redact_annot(bbox, fill=bg_rgb)
             page.apply_redactions()
             self.selected_span_idx = None
             self.txt_editor.delete("1.0", tk.END)
@@ -1685,6 +1978,21 @@ class PdfVirtualEditor(tk.Frame):
             self.lbl_ribbon_status.config(text="✓ Selected text element redacted and removed.", fg="#047857")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to delete block:\n{e}")
+
+    def clear_pdf(self):
+        self.doc = None
+        self.pdf_path = None
+        self.current_page = 0
+        self.spans.clear()
+        self.selected_span_idx = None
+        self.hover_span_idx = None
+        self.canvas.delete("all")
+        self.lbl_page.config(text="Page: 0 / 0")
+        self.txt_editor.delete("1.0", tk.END)
+        for item in self.tree_spans.get_children():
+            self.tree_spans.delete(item)
+        self.lbl_font_info.config(text="No block selected")
+        self.lbl_ribbon_status.config(text="Cleared PDF document.")
 
     def prev_page(self):
         if self.doc and self.current_page > 0:
@@ -1755,21 +2063,12 @@ class SignatureSettingsDialog:
 
         grid = tk.Frame(c1, bg="#FFFFFF")
         grid.pack(fill=tk.X)
-        tk.Label(grid, text="Reason:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=4)
-        reasons = ["I approve this document", "I am the author of this document", "Official Authentication", "Verified and Approved"]
-        ttk.Combobox(grid, textvariable=app.sign_reason_var, values=reasons, font=get_sys_font(8)).grid(row=0, column=1, sticky="ew", padx=6, pady=4)
 
-        tk.Label(grid, text="Location:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=1, column=0, sticky="w", pady=4)
-        ttk.Entry(grid, textvariable=app.sign_location_var, font=get_sys_font(8)).grid(row=1, column=1, sticky="ew", padx=6, pady=4)
+        tk.Label(grid, text="Hash Algorithm:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Combobox(grid, textvariable=app.sign_hash_var, values=["SHA-256", "SHA-384", "SHA-512"], state="readonly", font=get_sys_font(8)).grid(row=0, column=1, sticky="ew", padx=6, pady=4)
 
-        tk.Label(grid, text="Contact Info:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=2, column=0, sticky="w", pady=4)
-        ttk.Entry(grid, textvariable=app.sign_contact_var, font=get_sys_font(8)).grid(row=2, column=1, sticky="ew", padx=6, pady=4)
-
-        tk.Label(grid, text="Hash Algorithm:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=3, column=0, sticky="w", pady=4)
-        ttk.Combobox(grid, textvariable=app.sign_hash_var, values=["SHA-256", "SHA-384", "SHA-512"], state="readonly", font=get_sys_font(8)).grid(row=3, column=1, sticky="ew", padx=6, pady=4)
-
-        tk.Label(grid, text="Time-Stamp (TSA):", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=4, column=0, sticky="w", pady=4)
-        ttk.Combobox(grid, textvariable=app.sign_tsa_var, values=["DigiCert TSA (Recommended)", "FreeTSA.org", "None"], state="readonly", font=get_sys_font(8)).grid(row=4, column=1, sticky="ew", padx=6, pady=4)
+        tk.Label(grid, text="Time-Stamp (TSA):", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Combobox(grid, textvariable=app.sign_tsa_var, values=["DigiCert TSA (Recommended)", "FreeTSA.org", "None"], state="readonly", font=get_sys_font(8)).grid(row=1, column=1, sticky="ew", padx=6, pady=4)
         grid.columnconfigure(1, weight=1)
 
         # 2. Custom Signature Logo Card
@@ -1805,12 +2104,6 @@ class SignatureSettingsDialog:
         self.ent_pass.pack(side=tk.LEFT, padx=6)
         self.btn_toggle_pass = ttk.Button(pass_row, text="Show", style="Tool3D.TButton", width=6, command=self._toggle_pass_visibility)
         self.btn_toggle_pass.pack(side=tk.LEFT)
-
-        # 4. Pages to sign
-        c4 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
-        c4.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(c4, text="4. Page Signing Options", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
-        tk.Checkbutton(c4, text="Sign all pages in the PDF document (replicates signature area across all pages)", variable=app.sign_all_pages_var, font=get_sys_font(8, "bold"), fg="#047857", bg="#FFFFFF").pack(anchor=tk.W)
 
         # Bottom Close Button
         btn_bot = tk.Frame(outer, bg="#F1F5F9")
@@ -2357,11 +2650,21 @@ class VisualPdfSignerApp:
         self.dsc_source_var = tk.StringVar(value="token")
 
         self.sign_reason_var = tk.StringVar(value="I approve this document")
-        self.sign_location_var = tk.StringVar(value="India")
-        self.sign_contact_var = tk.StringVar(value="sales@a-b-infotech.in")
+        self.sign_address_var = tk.StringVar(value="India")
+        self.sign_location_var = self.sign_address_var  # alias for backward compatibility
+        self.sign_contact_var = tk.StringVar(value="")
         self.sign_hash_var = tk.StringVar(value="SHA-256")
         self.sign_tsa_var = tk.StringVar(value="DigiCert TSA (Recommended)")
         self.sign_all_pages_var = tk.BooleanVar(value=True)
+
+        # Appearance Checkbox options (Name, Date, Reason, Address, Issuer, Green tick, Border)
+        self.show_name_var = tk.BooleanVar(value=True)
+        self.show_date_var = tk.BooleanVar(value=True)
+        self.show_reason_var = tk.BooleanVar(value=True)
+        self.show_address_var = tk.BooleanVar(value=True)
+        self.show_issuer_var = tk.BooleanVar(value=False)
+        self.show_tick_var = tk.BooleanVar(value=True)
+        self.show_border_var = tk.BooleanVar(value=False)
 
         # Custom Logo & Password Protection settings
         self.sign_custom_logo_path = tk.StringVar(value="")
@@ -2444,7 +2747,15 @@ class VisualPdfSignerApp:
         self.root.deiconify()
         self._maximize_window(self.root)
         self.root.lift()
+        self.root.attributes('-topmost', True)
+        self.root.after(150, lambda: self.root.attributes('-topmost', False))
         self.root.focus_force()
+        if CURRENT_OS == 'Windows':
+            try:
+                hwnd = self.root.winfo_id()
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
 
     def _maximize_window(self, window):
         try:
@@ -2705,6 +3016,7 @@ class VisualPdfSignerApp:
         tk.Label(f_token, text="Certificate in Token:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
         self.token_cert_combo = ttk.Combobox(f_token, state="readonly", font=get_sys_font(8))
         self.token_cert_combo.pack(fill=tk.X, pady=(2, 4))
+        self.token_cert_combo.bind("<<ComboboxSelected>>", self._on_token_cert_selected)
 
         pin_row = tk.Frame(f_token); pin_row.pack(fill=tk.X, pady=(2, 2))
         tk.Label(pin_row, text="Hardware Token PIN:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(side=tk.LEFT)
@@ -2725,10 +3037,56 @@ class VisualPdfSignerApp:
         ttk.Entry(p_row2, textvariable=self.pfx_pass_var, show="*", width=14).pack(side=tk.LEFT, padx=6)
         ttk.Button(p_row2, text="Verify", style="Tool3D.TButton", command=lambda: self.verify_pfx_certificate(silent=False)).pack(side=tk.LEFT)
 
+        # 4 Options Card: Reason, Address, Sign all pages, Checkbox Bar
+        opts_card = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SOLID, bd=1, padx=6, pady=5)
+        opts_card.pack(fill=tk.X, pady=(0, 6))
+
+        # 1. Reason
+        r_row = tk.Frame(opts_card, bg="#F8FAFC")
+        r_row.pack(fill=tk.X, pady=1)
+        tk.Label(r_row, text="Reason:", font=get_sys_font(8, "bold"), fg="#1E3A8A", bg="#F8FAFC", width=8, anchor=tk.W).pack(side=tk.LEFT)
+        reasons = ["I approve this document", "I am the author of this document", "Official Authentication", "Verified and Approved"]
+        ttk.Combobox(r_row, textvariable=self.sign_reason_var, values=reasons, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 2. Address (auto-populated from token/pfx certificate)
+        a_row = tk.Frame(opts_card, bg="#F8FAFC")
+        a_row.pack(fill=tk.X, pady=1)
+        tk.Label(a_row, text="Address:", font=get_sys_font(8, "bold"), fg="#1E3A8A", bg="#F8FAFC", width=8, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Entry(a_row, textvariable=self.sign_address_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 3. Sign all pages
+        tk.Checkbutton(
+            opts_card,
+            text="📄 Sign all pages in the PDF document",
+            variable=self.sign_all_pages_var,
+            font=get_sys_font(8, "bold"),
+            fg="#047857", bg="#F8FAFC"
+        ).pack(anchor=tk.W, pady=(2, 2))
+
+        # 4. Checkbox bar (Name, Date, Reason, Address, Issuer, Green tick, Border)
+        chk_bar = tk.Frame(opts_card, bg="#F8FAFC")
+        chk_bar.pack(fill=tk.X, pady=(1, 1))
+
+        for text, var in [
+            ("Name", self.show_name_var),
+            ("Date", self.show_date_var),
+            ("Reason", self.show_reason_var),
+            ("Address", self.show_address_var),
+            ("Issuer", self.show_issuer_var),
+            ("Green tick", self.show_tick_var),
+            ("Border", self.show_border_var),
+        ]:
+            tk.Checkbutton(
+                chk_bar, text=text, variable=var,
+                font=get_sys_font(7, "bold"),
+                fg="#1E293B", bg="#F8FAFC",
+                padx=1, pady=0
+            ).pack(side=tk.LEFT, padx=1)
+
         # Selected Signature Areas Listbox / Container
-        tk.Label(left_panel, text="Selected Signature Area(s):", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(6, 2))
-        self.area_container = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SUNKEN, bd=1, height=90)
-        self.area_container.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(left_panel, text="Selected Signature Area(s):", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(4, 2))
+        self.area_container = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SUNKEN, bd=1, height=75)
+        self.area_container.pack(fill=tk.X, pady=(0, 6))
         self.area_container.pack_propagate(False)
 
         self.lbl_no_areas = tk.Label(self.area_container, text="No area selected yet.\nClick 'Draw Signature Box' on the right canvas.", font=get_sys_font(8), fg="#64748B", bg="#F8FAFC")
@@ -2736,13 +3094,14 @@ class VisualPdfSignerApp:
 
         # Actions & Settings Buttons
         action_row = tk.Frame(left_panel, bg="#FFFFFF")
-        action_row.pack(fill=tk.X, pady=(0, 8))
+        action_row.pack(fill=tk.X, pady=(0, 6))
 
-        self.btn_signature_settings = ttk.Button(action_row, text="⚙️ Signature Settings", style="Tool3D.TButton", command=self.open_signature_settings)
         if LicenseManager.is_pro():
-            self.btn_signature_settings.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        self.btn_bulk_sign = ttk.Button(action_row, text="📁 Bulk Sign Folder", style="Tool3D.TButton", command=self.open_batch_dialog)
-        self.btn_bulk_sign.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(4, 0))
+            self.btn_signature_settings = ttk.Button(action_row, text="⚙️ Signature Settings", style="Tool3D.TButton", command=self.open_signature_settings)
+            self.btn_signature_settings.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        self.btn_bulk_sign = ttk.Button(action_row, text="📁 Bulk Sign", style="Tool3D.TButton", command=self.open_batch_dialog)
+        self.btn_bulk_sign.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(action_row, text="❌ Clear PDF", style="Tool3D.TButton", command=self._clear_sign_pdf).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
 
         # Bottom Big Signing Button
         bot_f = tk.Frame(left_panel, bg="#FFFFFF")
@@ -2763,7 +3122,7 @@ class VisualPdfSignerApp:
         right_panel = tk.Frame(split, bg="#E2E8F0")
         right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        self.sign_viewer = EmbeddedPdfViewer(right_panel, on_area_selected=self._on_sign_area_picked, allow_drawing=True)
+        self.sign_viewer = EmbeddedPdfViewer(right_panel, on_area_selected=self._on_sign_area_picked, allow_drawing=True, on_clear=self._clear_sign_pdf)
         self.sign_viewer.pack(fill=tk.BOTH, expand=True)
 
     def _on_sign_area_picked(self, area_data):
@@ -2789,6 +3148,13 @@ class VisualPdfSignerApp:
     def open_signature_settings(self):
         SignatureSettingsDialog(self.root, self)
 
+    def _clear_sign_pdf(self):
+        self.signature_areas.clear()
+        self._update_sign_areas_ui()
+        self.lbl_sign_status.config(text="PDF cleared. Open a document on the right to begin.", fg="#64748B")
+        if hasattr(self, 'sign_viewer') and self.sign_viewer.doc is not None:
+            self.sign_viewer.clear_pdf()
+
     # =========================================================================
     # TAB 2: 🗜️ COMPRESS (with Live PDF Viewer)
     # =========================================================================
@@ -2807,7 +3173,8 @@ class VisualPdfSignerApp:
         self.compress_path_var = tk.StringVar()
         r1 = tk.Frame(left, bg="#FFFFFF"); r1.pack(fill=tk.X, pady=(2, 8))
         ttk.Entry(r1, textvariable=self.compress_path_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=self._browse_compress_pdf).pack(side=tk.RIGHT)
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=self._browse_compress_pdf).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(r1, text="❌ Clear", style="Tool3D.TButton", command=self._clear_compress_pdf).pack(side=tk.RIGHT)
 
         tk.Label(left, text="Compression Preset:", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(anchor=tk.W, pady=(6, 2))
         self.compress_preset_var = tk.StringVar(value="medium")
@@ -2829,6 +3196,12 @@ class VisualPdfSignerApp:
         if f:
             self.compress_path_var.set(f)
             self.compress_viewer.load_pdf(f)
+
+    def _clear_compress_pdf(self):
+        self.compress_path_var.set("")
+        self.lbl_compress_res.config(text="")
+        if hasattr(self, 'compress_viewer') and self.compress_viewer.doc is not None:
+            self.compress_viewer.clear_pdf()
 
     def exec_compress(self):
         in_p = self.compress_path_var.get().strip()
@@ -2889,6 +3262,7 @@ class VisualPdfSignerApp:
         ttk.Button(btn_row, text="▲ Up", style="Tool3D.TButton", command=self.merge_move_up).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_row, text="▼ Down", style="Tool3D.TButton", command=self.merge_move_down).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_row, text="🗑️ Remove", style="Tool3D.TButton", command=self.merge_remove_file).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row, text="❌ Clear All", style="Tool3D.TButton", command=self.merge_clear_all).pack(side=tk.RIGHT, padx=2)
 
         ttk.Button(left, text="📑 MERGE & SAVE AS ONE PDF", style="Primary3D.TButton", command=self.exec_merge).pack(fill=tk.X, ipady=4, pady=(10, 0))
 
@@ -2936,6 +3310,12 @@ class VisualPdfSignerApp:
             del self.merge_pdf_list[idx]
             self._refresh_merge_list(max(0, idx-1))
 
+    def merge_clear_all(self):
+        self.merge_pdf_list.clear()
+        self.merge_listbox.delete(0, tk.END)
+        if hasattr(self, 'merge_viewer') and self.merge_viewer.doc is not None:
+            self.merge_viewer.clear_pdf()
+
     def _refresh_merge_list(self, new_sel=None):
         self.merge_listbox.delete(0, tk.END)
         for f in self.merge_pdf_list:
@@ -2980,7 +3360,8 @@ class VisualPdfSignerApp:
         self.verify_path_var = tk.StringVar()
         r1 = tk.Frame(left, bg="#FFFFFF"); r1.pack(fill=tk.X, pady=(0, 6))
         ttk.Entry(r1, textvariable=self.verify_path_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=self._browse_verify_pdf).pack(side=tk.RIGHT)
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=self._browse_verify_pdf).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(r1, text="❌ Clear", style="Tool3D.TButton", command=self._clear_verify_pdf).pack(side=tk.RIGHT)
 
         ttk.Button(left, text="🔍 VERIFY SIGNATURES IN PDF", style="Primary3D.TButton", command=self.exec_verify).pack(fill=tk.X, ipady=4, pady=(2, 8))
 
@@ -2999,6 +3380,12 @@ class VisualPdfSignerApp:
         if f:
             self.verify_path_var.set(f)
             self.verify_viewer.load_pdf(f)
+
+    def _clear_verify_pdf(self):
+        self.verify_path_var.set("")
+        self.txt_verify_report.delete("1.0", tk.END)
+        if hasattr(self, 'verify_viewer') and self.verify_viewer.doc is not None:
+            self.verify_viewer.clear_pdf()
 
     def exec_verify(self):
         p = self.verify_path_var.get().strip()
@@ -3047,7 +3434,8 @@ class VisualPdfSignerApp:
         self.tool_pdf_path_var = tk.StringVar()
         r1 = tk.Frame(left, bg="#FFFFFF"); r1.pack(fill=tk.X, pady=(2, 8))
         ttk.Entry(r1, textvariable=self.tool_pdf_path_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=self._browse_tool_pdf).pack(side=tk.RIGHT)
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=self._browse_tool_pdf).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(r1, text="❌ Clear", style="Tool3D.TButton", command=self._clear_tool_pdf).pack(side=tk.RIGHT)
 
         nb_tools = ttk.Notebook(left)
         nb_tools.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
@@ -3089,6 +3477,11 @@ class VisualPdfSignerApp:
         if f:
             self.tool_pdf_path_var.set(f)
             self.tool_viewer.load_pdf(f)
+
+    def _clear_tool_pdf(self):
+        self.tool_pdf_path_var.set("")
+        if hasattr(self, 'tool_viewer') and self.tool_viewer.doc is not None:
+            self.tool_viewer.clear_pdf()
 
     def exec_protect_pdf(self):
         p = self.tool_pdf_path_var.get().strip()
@@ -3235,10 +3628,15 @@ class VisualPdfSignerApp:
                                 if attr.oid == x509.NameOID.COMMON_NAME:
                                     cn = attr.value; break
 
+                            email, addr = extract_cert_email_and_address(c)
+
                             self.loaded_certs.append({
                                 'alias': str(c.serial_number),
                                 'cn': cn,
-                                'source': token.label
+                                'source': token.label,
+                                'email': email,
+                                'address': addr,
+                                'cert_obj': c
                             })
                 except Exception:
                     continue
@@ -3246,11 +3644,21 @@ class VisualPdfSignerApp:
             self.token_cert_combo['values'] = [f"{c['cn']} ({c['source']})" for c in self.loaded_certs]
             if self.loaded_certs:
                 self.token_cert_combo.current(0)
+                self._on_token_cert_selected()
                 self.lbl_sign_status.config(text=f"Loaded {len(self.loaded_certs)} certificate(s) from hardware token.", fg="#047857")
             else:
                 messagebox.showwarning("No Certificates", "No signing certificates found in token. Please check PIN.")
         except Exception as e:
             messagebox.showerror("Token Error", f"Could not read certificates: {e}")
+
+    def _on_token_cert_selected(self, event=None):
+        idx = self.token_cert_combo.current()
+        if 0 <= idx < len(self.loaded_certs):
+            c_info = self.loaded_certs[idx]
+            if c_info.get('address'):
+                self.sign_address_var.set(c_info['address'])
+            if c_info.get('email'):
+                self.sign_contact_var.set(c_info['email'])
 
     def browse_pfx_file(self):
         f = filedialog.askopenfilename(title="Select .PFX / .P12 File", filetypes=[("PKCS#12 Files", "*.pfx;*.p12")])
@@ -3265,11 +3673,20 @@ class VisualPdfSignerApp:
             if not silent: messagebox.showerror("Error", "Please select a PFX file."); return False
         try:
             signer, cert = load_pfx_certificate(pfx_p, pwd)
+            email, addr = extract_cert_email_and_address(cert)
+            if addr:
+                self.sign_address_var.set(addr)
+            if email:
+                self.sign_contact_var.set(email)
+
             cn = "Unknown"
             for attr in cert.subject:
                 if attr.oid == x509.NameOID.COMMON_NAME: cn = attr.value; break
             if not silent:
-                messagebox.showinfo("Verified", f"Certificate Verified:\nCommon Name (CN): {cn}\nExpires: {cert.not_valid_after_utc}")
+                info_msg = f"Certificate Verified:\nCommon Name (CN): {cn}\nExpires: {cert.not_valid_after_utc}"
+                if email: info_msg += f"\nEmail: {email}"
+                if addr: info_msg += f"\nAddress: {addr}"
+                messagebox.showinfo("Verified", info_msg)
             return True
         except Exception as e:
             if not silent: messagebox.showerror("PFX Error", str(e))
@@ -3305,6 +3722,20 @@ class VisualPdfSignerApp:
                 messagebox.showerror("Error", "Please select a valid PFX certificate and password."); return
             pin, cert_alias = None, None
 
+        # Handle Sign All Pages
+        if self.sign_all_pages_var.get():
+            total_pages = len(self.sign_viewer.doc) if self.sign_viewer.doc else 1
+            base_areas = list(self.signature_areas)
+            all_areas = []
+            for p_no in range(total_pages):
+                for a in base_areas:
+                    new_a = dict(a)
+                    new_a['page'] = p_no
+                    all_areas.append(new_a)
+            areas_to_sign = all_areas
+        else:
+            areas_to_sign = list(self.signature_areas)
+
         # Bulk or Single
         if getattr(self, 'bulk_mode', False) and getattr(self, 'bulk_pdf_files', []):
             self._start_bulk_signing_process(is_token, pin, cert_alias, pfx_path, pfx_pass)
@@ -3318,7 +3749,7 @@ class VisualPdfSignerApp:
 
         t = threading.Thread(
             target=self._signing_worker,
-            args=(self.sign_viewer.pdf_path, out_path, is_token, pin, cert_alias, pfx_path, pfx_pass, list(self.signature_areas))
+            args=(self.sign_viewer.pdf_path, out_path, is_token, pin, cert_alias, pfx_path, pfx_pass, areas_to_sign)
         )
         t.start()
 
@@ -3328,12 +3759,22 @@ class VisualPdfSignerApp:
                 pdf_data = f.read()
 
             driver_path = DRIVER_MAP.get(self.driver_var.get())
-            reason = self.sign_reason_var.get()
-            location = self.sign_location_var.get()
-            contact = self.sign_contact_var.get()
+            reason = self.sign_reason_var.get().strip()
+            location = self.sign_address_var.get().strip()
+            contact = self.sign_contact_var.get().strip()
             tsa = TSA_URL if "DigiCert" in self.sign_tsa_var.get() else None
 
             custom_logo = self.sign_custom_logo_path.get() if (self.sign_include_logo.get() and self.sign_custom_logo_path.get()) else None
+
+            appearance_opts = {
+                'show_name': self.show_name_var.get(),
+                'show_date': self.show_date_var.get(),
+                'show_reason': self.show_reason_var.get(),
+                'show_address': self.show_address_var.get(),
+                'show_issuer': self.show_issuer_var.get(),
+                'show_tick': self.show_tick_var.get(),
+                'show_border': self.show_border_var.get(),
+            }
 
             if is_token:
                 lib = pkcs11.lib(driver_path)
@@ -3352,11 +3793,11 @@ class VisualPdfSignerApp:
                     if not cert_id: raise ValueError("Certificate not found in token.")
                     signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
 
-                    visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact, logo_path=custom_logo)
+                    visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact, logo_path=custom_logo, appearance_opts=appearance_opts)
                     self._pyhanko_sign_incremental(visual_pdf, out_p, signer, areas, tsa)
             else:
                 signer, cert_parsed = load_pfx_certificate(pfx_path, pfx_pass)
-                visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact, logo_path=custom_logo)
+                visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact, logo_path=custom_logo, appearance_opts=appearance_opts)
                 self._pyhanko_sign_incremental(visual_pdf, out_p, signer, areas, tsa)
 
             # Optional AES-256 Document Encryption & Password Protection
@@ -3495,8 +3936,56 @@ class VisualPdfSignerApp:
 # ==========================================
 # 7. MAIN ENTRYPOINT & TRAY INTEGRATION
 # ==========================================
+_app_single_instance_mutex = None
+
+def check_single_instance():
+    """
+    Checks if another instance of A B INFOTECH Suite is already running.
+    If so, requests the existing instance to bring its window to the front and returns True.
+    """
+    global _app_single_instance_mutex
+
+    # 1. Attempt to signal running instance via local Flask API
+    try:
+        req = urllib.request.Request("http://127.0.0.1:5000/api/show_window", method='GET')
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            if resp.status == 200:
+                print("A B INFOTECH Suite is already running. Existing window brought to front.")
+                logger.info("Existing instance detected via local API. Window brought to front. Exiting duplicate instance.")
+                return True
+    except Exception:
+        pass
+
+    # 2. Windows Named Mutex Check
+    if CURRENT_OS == 'Windows':
+        try:
+            kernel32 = ctypes.windll.kernel32
+            mutex_name = "ABInfoTechSignerSingleInstanceMutex"
+            mutex = kernel32.CreateMutexW(None, False, mutex_name)
+            last_err = kernel32.GetLastError()
+            if last_err == 183:  # ERROR_ALREADY_EXISTS
+                # Ping the API to bring running instance to front
+                for _ in range(4):
+                    try:
+                        req = urllib.request.Request("http://127.0.0.1:5000/api/show_window", method='GET')
+                        with urllib.request.urlopen(req, timeout=0.8) as resp:
+                            if resp.status == 200:
+                                break
+                    except Exception:
+                        time.sleep(0.2)
+                print("Another instance is already active. Exiting duplicate instance.")
+                return True
+            _app_single_instance_mutex = mutex
+        except Exception as e:
+            logger.debug(f"Mutex check exception: {e}")
+
+    return False
+
 def main():
     global gui_root, gui_app
+
+    if check_single_instance():
+        sys.exit(0)
 
     gui_root = tk.Tk()
     gui_app = VisualPdfSignerApp(gui_root)
