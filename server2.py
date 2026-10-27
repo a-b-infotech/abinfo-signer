@@ -27,6 +27,8 @@ import base64
 import webbrowser
 import urllib.parse
 import urllib.request
+import tempfile
+import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import subprocess
@@ -228,10 +230,32 @@ class LicenseManager:
             return False
 
     @staticmethod
-    def save_license(key, expiredate="never", tier="pro", **kwargs):
+    def save_license(key, expiredate="never", tier="pro", id=None, status="active", client_email="", activated_at=None, **kwargs):
+        """
+        Stores complete license record in system_cache.ico:
+        1. id
+        2. license_key
+        3. status ('active', 'inactive', 'suspended')
+        4. license_tier ('basic', 'pro')
+        5. client_email
+        6. activated_at
+        7. expiredate
+        """
         tier_clean = "basic" if str(tier).lower().strip() == "basic" else "pro"
-        data_to_encode = f"{key}|||{expiredate}|||{tier_clean}"
-        encoded_data = base64.b64encode(data_to_encode.encode())
+        act_date = activated_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        lic_dict = {
+            "id": id,
+            "license_key": key,
+            "key": key,
+            "status": status or "active",
+            "license_tier": tier_clean,
+            "tier": tier_clean,
+            "client_email": client_email or "",
+            "activated_at": act_date,
+            "expiredate": expiredate or "never"
+        }
+        encoded_data = base64.b64encode(json.dumps(lic_dict).encode('utf-8'))
 
         icon_binary = b""
         target_icon = "app_icon.ico" if os.path.exists("app_icon.ico") else "icon.ico"
@@ -265,10 +289,20 @@ class LicenseManager:
 
     @staticmethod
     def get_license_info():
+        """
+        Retrieves all 7 license fields from system_cache.ico.
+        Supports JSON format with backward-compatible fallback.
+        """
         default_info = {
+            "id": None,
+            "license_key": None,
             "key": None,
-            "expiredate": "never",
-            "tier": "pro"
+            "status": "inactive",
+            "license_tier": "pro",
+            "tier": "pro",
+            "client_email": "",
+            "activated_at": "",
+            "expiredate": "never"
         }
         if not LicenseManager.is_activated():
             return default_info
@@ -280,6 +314,31 @@ class LicenseManager:
                 if len(parts) > 1:
                     encoded_data = parts[-1]
                     decoded_str = base64.b64decode(encoded_data).decode('utf-8')
+
+                    # 1. Parse JSON format with all 7 fields
+                    try:
+                        parsed = json.loads(decoded_str)
+                        if isinstance(parsed, dict):
+                            raw_tier = parsed.get("license_tier") or parsed.get("tier", "pro")
+                            tier = "basic" if str(raw_tier).lower().strip() == "basic" else "pro"
+                            k = parsed.get("license_key") or parsed.get("key")
+                            if k == "ABI-MASTER-PASS":
+                                tier = "pro"
+                            return {
+                                "id": parsed.get("id"),
+                                "license_key": k,
+                                "key": k,
+                                "status": parsed.get("status", "active"),
+                                "license_tier": tier,
+                                "tier": tier,
+                                "client_email": parsed.get("client_email", ""),
+                                "activated_at": parsed.get("activated_at", ""),
+                                "expiredate": parsed.get("expiredate", "never")
+                            }
+                    except Exception:
+                        pass
+
+                    # 2. Legacy delimited fallback (key|||expiredate|||tier)
                     chunks = decoded_str.split("|||")
                     k = chunks[0] if len(chunks) > 0 else None
                     exp = chunks[1] if len(chunks) > 1 else "never"
@@ -290,9 +349,15 @@ class LicenseManager:
                         tier = "pro"
 
                     return {
+                        "id": None,
+                        "license_key": k,
                         "key": k,
-                        "expiredate": exp,
-                        "tier": tier
+                        "status": "active" if k else "inactive",
+                        "license_tier": tier,
+                        "tier": tier,
+                        "client_email": "",
+                        "activated_at": "",
+                        "expiredate": exp
                     }
         except Exception as e:
             logger.error(f"Failed to read license info: {e}")
@@ -310,9 +375,17 @@ class LicenseManager:
 
     @staticmethod
     def check_expiration_local():
-        key, expiredate = LicenseManager.get_license_data()
-        if not key or key == "ABI-MASTER-PASS":
+        info = LicenseManager.get_license_info()
+        key = info.get("key")
+        expiredate = info.get("expiredate")
+        status = info.get("status", "active")
+
+        if not key:
+            return "inactive"
+        if key == "ABI-MASTER-PASS":
             return "active"
+        if status in ["inactive", "suspended"]:
+            return status
 
         if expiredate and expiredate != "never":
             try:
@@ -323,6 +396,45 @@ class LicenseManager:
                 logger.error(f"Date parsing error: {e}")
 
         return "active"
+
+    @staticmethod
+    def verify_with_database():
+        """
+        One-time check that validates every detail in system_cache.ico against the database.
+        Syncs id, license_key, status, license_tier, client_email, activated_at, expiredate.
+        """
+        info = LicenseManager.get_license_info()
+        key = info.get("key")
+        if not key or key == "ABI-MASTER-PASS":
+            return {"status": "active", "tier": "pro"}
+
+        urls_to_try = [
+            f"http://127.0.0.1/pdf/activate_web.php?action=verify_license&key={urllib.parse.quote(key)}",
+            f"{LicenseManager.WEBSITE_URL}?action=verify_license&key={urllib.parse.quote(key)}"
+        ]
+        for url in urls_to_try:
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) A B INFOTECH Suite'})
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    if resp.status == 200:
+                        raw = resp.read().decode('utf-8')
+                        data = json.loads(raw)
+                        db_status = data.get('status', 'invalid')
+                        if db_status in ['active', 'expired', 'inactive', 'suspended']:
+                            LicenseManager.save_license(
+                                key=key,
+                                expiredate=data.get('expiredate', info.get('expiredate', 'never')),
+                                tier=data.get('license_tier') or data.get('tier', info.get('tier', 'pro')),
+                                id=data.get('id', info.get('id')),
+                                status=db_status,
+                                client_email=data.get('client_email', info.get('client_email', '')),
+                                activated_at=data.get('activated_at', info.get('activated_at', ''))
+                            )
+                            return data
+            except Exception as e:
+                logger.debug(f"Direct DB verify attempt failed on {url}: {e}")
+
+        return {"status": LicenseManager.check_expiration_local(), "tier": info.get("tier", "pro")}
 
     @staticmethod
     def is_pro():
@@ -425,6 +537,105 @@ def get_platform_drivers():
 
 DRIVER_MAP = get_platform_drivers()
 TSA_URL = "http://timestamp.digicert.com"
+
+# Global server state for Web API bridge
+server_config = {
+    'status': 'running',
+    'port': 5000,
+    'host': '127.0.0.1',
+    'driver_path': find_epass_driver_path() or ''
+}
+
+def convert_docx_to_pdf_bytes(docx_path):
+    """
+    Converts a Word document (.docx or .doc) to PDF bytes.
+    Method 1: Uses Windows Word COM automation if MS Word is installed.
+    Method 2: Pure Python fallback using python-docx + ReportLab without needing MS Word.
+    """
+    if CURRENT_OS == 'Windows':
+        try:
+            import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = False
+            abs_in = os.path.abspath(docx_path)
+            tmp_pdf = os.path.join(tempfile.gettempdir(), f"abi_word_{uuid.uuid4().hex[:8]}.pdf")
+            doc = word.Documents.Open(abs_in, ReadOnly=True)
+            doc.SaveAs(tmp_pdf, FileFormat=17)  # 17 = wdFormatPDF
+            doc.Close(False)
+            word.Quit()
+            if os.path.exists(tmp_pdf):
+                with open(tmp_pdf, 'rb') as f:
+                    pdf_data = f.read()
+                try: os.remove(tmp_pdf)
+                except Exception: pass
+                if pdf_data:
+                    return pdf_data
+        except Exception as e:
+            logger.debug(f"win32com word conversion attempt notice: {e}")
+
+    try:
+        import docx
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        doc = docx.Document(docx_path)
+        buf = io.BytesIO()
+        pdf_doc = SimpleDocTemplate(buf, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+        styles = getSampleStyleSheet()
+        story = []
+        for p in doc.paragraphs:
+            text = p.text.strip()
+            if text:
+                safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                story.append(Paragraph(safe_text, styles['Normal']))
+                story.append(Spacer(1, 4))
+        for table in doc.tables:
+            for row in table.rows:
+                row_txt = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if row_txt:
+                    safe_row = row_txt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    story.append(Paragraph(safe_row, styles['Normal']))
+                    story.append(Spacer(1, 3))
+        if not story:
+            story.append(Paragraph("[Empty Word Document]", styles['Normal']))
+        pdf_doc.build(story)
+        return buf.getvalue()
+    except Exception as e:
+        logger.error(f"Fallback docx convert error: {e}")
+        raise ValueError(f"Could not convert Word document '{os.path.basename(docx_path)}' to PDF: {e}")
+
+def convert_file_to_pdf_bytes(filepath):
+    """
+    Converts any supported file (PDF, Word, Images) to PDF bytes:
+    - .pdf: direct raw bytes
+    - .png, .jpg, .jpeg, .bmp, .tiff, .webp, .gif: PyMuPDF high-res image-to-PDF conversion
+    - .docx, .doc: Word to PDF conversion
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == '.pdf':
+        with open(filepath, 'rb') as f:
+            return f.read()
+    elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.gif']:
+        img_doc = fitz.open(filepath)
+        pdf_bytes = img_doc.convert_to_pdf()
+        img_doc.close()
+        return pdf_bytes
+    elif ext in ['.docx', '.doc']:
+        return convert_docx_to_pdf_bytes(filepath)
+    else:
+        # Fallback to PyMuPDF generic conversion
+        sub_doc = fitz.open(filepath)
+        if sub_doc.is_pdf:
+            data = sub_doc.tobytes()
+            sub_doc.close()
+            return data
+        pdf_bytes = sub_doc.convert_to_pdf()
+        sub_doc.close()
+        return pdf_bytes
 
 # ==========================================
 # 1.5. CRYPTOGRAPHIC SIGNING & REPORTLAB OVERLAY
@@ -962,12 +1173,24 @@ def activate_callback():
     raw_tier = request.args.get('tier', 'pro')
     tier = 'basic' if str(raw_tier).lower().strip() == 'basic' else 'pro'
 
+    lic_id = request.args.get('id')
+    status_val = request.args.get('status_val', 'active')
+    client_email = request.args.get('client_email', '')
+    activated_at = request.args.get('activated_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
     close_script = "<script>setTimeout(function(){ window.opener = null; window.open('','_self'); window.close(); }, 1200);</script>"
 
     if status == 'valid' and key:
-        LicenseManager.save_license(key, expiredate, tier=tier)
+        LicenseManager.save_license(
+            key, expiredate, tier=tier,
+            id=lic_id, status=status_val,
+            client_email=client_email, activated_at=activated_at
+        )
         LicenseManager.activation_error = None
         tier_title = tier.upper()
+        if gui_root and gui_app:
+            gui_root.after(0, lambda: (gui_app.show_window(), gui_app._init_app_interface() if not hasattr(gui_app, 'notebook') else None))
+
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h1 style='color: #2ecc71;'>Activation Successful!</h1>
@@ -990,14 +1213,25 @@ def activate_callback():
 @app.route('/api/sync_callback')
 def sync_callback():
     status = request.args.get('status')
-    key = LicenseManager.get_license_key()
+    key = request.args.get('key') or LicenseManager.get_license_key()
     raw_tier = request.args.get('tier', 'pro')
     tier = 'basic' if str(raw_tier).lower().strip() == 'basic' else 'pro'
+    lic_id = request.args.get('id')
+    status_val = request.args.get('status_val', 'active')
+    client_email = request.args.get('client_email', '')
+    activated_at = request.args.get('activated_at', '')
+    expiredate = request.args.get('expiredate', 'never')
+
     close_script = "<script>setTimeout(function(){ window.opener = null; window.open('','_self'); window.close(); }, 1000);</script>"
 
     if status in ['expired', 'inactive', 'invalid', 'suspended']:
         logger.warning(f"Browser Sync: License is {status}. Locking app.")
-        LicenseManager.save_license(key, "2000-01-01 00:00:00", tier=tier)
+        LicenseManager.save_license(
+            key, "2000-01-01 00:00:00", tier=tier,
+            id=lic_id, status=status, client_email=client_email, activated_at=activated_at
+        )
+        if gui_root and gui_app:
+            gui_root.after(0, gui_app._show_activation_screen)
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h2 style='color: #e74c3c;'>License Suspended or Expired</h2>
@@ -1008,8 +1242,15 @@ def sync_callback():
     else:
         logger.info(f"Browser Sync: License is active! Tier: {tier}")
         if key:
-            _, exp = LicenseManager.get_license_data()
-            LicenseManager.save_license(key, exp, tier=tier)
+            info = LicenseManager.get_license_info()
+            exp = expiredate if expiredate and expiredate != 'never' else info.get('expiredate', 'never')
+            LicenseManager.save_license(
+                key, exp, tier=tier,
+                id=lic_id or info.get('id'),
+                status='active',
+                client_email=client_email or info.get('client_email', ''),
+                activated_at=activated_at or info.get('activated_at', '')
+            )
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h2 style='color: #2ecc71;'>License Verified Online!</h2>
@@ -1017,6 +1258,156 @@ def sync_callback():
             {close_script}
         </body></html>
         """
+
+@app.route('/api/drivers')
+def api_drivers():
+    return jsonify(list(DRIVER_MAP.keys()))
+
+@app.route('/api/health')
+def health():
+    is_activated = LicenseManager.is_activated()
+    exp_status = LicenseManager.check_expiration_local() if is_activated else "inactive"
+    is_expired = (exp_status == "expired")
+    
+    is_demo = not is_activated or is_expired
+    active_key = LicenseManager.get_license_key()
+    
+    return jsonify({
+        'status': 'healthy', 
+        'server_status': server_config.get('status', 'running'),
+        'version': '1.0',
+        'demo': is_demo,
+        'expired': is_expired,
+        'key': active_key
+    })
+
+@app.route('/api/certificates')
+def api_certs():
+    req_driver = request.args.get('driver_name')
+    if req_driver and req_driver in DRIVER_MAP:
+        server_config['driver_path'] = DRIVER_MAP[req_driver]
+    elif not server_config.get('driver_path'):
+        server_config['driver_path'] = find_epass_driver_path() or ''
+    
+    certs = []
+    if server_config['driver_path'] and os.path.exists(server_config['driver_path']):
+        try:
+            lib = pkcs11.lib(server_config['driver_path'])
+            for slot in lib.get_slots(token_present=True):
+                try:
+                    token = slot.get_token()
+                    with token.open() as session:
+                        for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
+                            cert = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
+                            try:
+                                if cert.subject == cert.issuer: continue
+                            except Exception: pass
+
+                            try:
+                                key_usage = cert.extensions.get_extension_for_class(x509.KeyUsage).value
+                                if not (key_usage.digital_signature or key_usage.content_commitment): continue
+                            except Exception: pass
+                            
+                            cn = "Unknown"
+                            for attr in cert.subject:
+                                if attr.oid == x509.NameOID.COMMON_NAME:
+                                    cn = attr.value; break
+
+                            email, addr = extract_cert_email_and_address(cert)
+                            certs.append({
+                                'alias': str(cert.serial_number),
+                                'subject': cert.subject.rfc4514_string(),
+                                'cn': cn,
+                                'email': email,
+                                'address': addr,
+                                'source': f"USB Token ({token.label})"
+                            })
+                except Exception: continue
+        except Exception as e:
+            logger.error(f"Cert fetch error: {e}")
+    return jsonify(certs)
+
+@app.route('/api/sign', methods=['POST'])
+def sign_pdf():
+    try:
+        if LicenseManager.check_expiration_local() == "expired":
+            return jsonify({"error": "Your software license has expired. Please contact +91 7016797720 or sales@a-b-infotech.in to renew."}), 403
+
+        pdf_data = request.files['file'].read()
+        pin = request.form.get('password')
+        signature_areas = json.loads(request.form.get('areas', '[]'))
+        cert_meta = json.loads(request.form.get('certificate', '{}'))
+        serial_number = cert_meta.get('alias')
+        
+        for area in signature_areas:
+            area['page'] = int(area.get('page', 1)) - 1
+
+        client_driver = request.form.get('driver_name')
+        if client_driver and client_driver in DRIVER_MAP:
+            server_config['driver_path'] = DRIVER_MAP[client_driver]
+        elif not server_config.get('driver_path'):
+            server_config['driver_path'] = find_epass_driver_path() or ''
+
+        lib = pkcs11.lib(server_config['driver_path'])
+        
+        token = None
+        for slot in lib.get_slots(token_present=True):
+            try:
+                token = slot.get_token()
+                break
+            except Exception: continue
+        if not token: raise ValueError("Hardware Token not found.")
+
+        with token.open(user_pin=pin) as session:
+            cert_id, cert_parsed = None, None
+            for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
+                c = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
+                if str(c.serial_number) == str(serial_number):
+                    cert_id, cert_parsed = obj[pkcs11.Attribute.ID], c
+                    break
+            
+            if not cert_id: raise ValueError("Certificate not found. Check PIN.")
+            signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
+
+            visual_pdf_data = draw_reportlab_layer(pdf_data, signature_areas, cert_parsed)
+            current_io = io.BytesIO(visual_pdf_data)
+
+            base_reader = PdfReader(io.BytesIO(pdf_data))
+            tst_client = HTTPTimeStamper(TSA_URL)
+            
+            for idx, area in enumerate(signature_areas):
+                field_name = f"WebSignature_{idx+1}"
+                p_idx = area['page']
+                page_meta = base_reader.pages[p_idx]
+                
+                offset_x = float(page_meta.mediabox.left if hasattr(page_meta.mediabox, 'left') else page_meta.mediaBox.getLowerLeft_x())
+                offset_y = float(page_meta.mediabox.bottom if hasattr(page_meta.mediabox, 'bottom') else page_meta.mediaBox.getLowerLeft_y())
+
+                x1, y1 = int(area['x'] + offset_x), int(area['y'] + offset_y)
+                x2, y2 = int(area['x'] + area['width'] + offset_x), int(area['y'] + area['height'] + offset_y)
+                
+                writer = IncrementalPdfFileWriter(current_io)
+                append_signature_field(writer, SigFieldSpec(field_name, box=(x1, y1, x2, y2), on_page=p_idx))
+                
+                tmp_io = io.BytesIO(); writer.write(tmp_io); tmp_io.seek(0)
+                final_writer = IncrementalPdfFileWriter(tmp_io)
+                
+                pdf_signer = signers.PdfSigner(
+                    signature_meta=signers.PdfSignatureMetadata(field_name=field_name),
+                    signer=signer, 
+                    timestamper=tst_client
+                )
+                
+                signed_out = io.BytesIO()
+                pdf_signer.sign_pdf(final_writer, in_place=False, output=signed_out)
+                signed_out.seek(0)
+                current_io = signed_out
+
+        return send_file(current_io, as_attachment=True, download_name="TokenSigned.pdf", mimetype='application/pdf')
+
+    except Exception as e:
+        logger.error(f"WEB API SIGNING ERROR: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
 
 gui_root = None
 gui_app = None
@@ -2434,38 +2825,71 @@ class SettingsDialog:
 
     def _build_license_tab(self, parent):
         hw_id = LicenseManager.get_hardware_id()
-        key, exp = LicenseManager.get_license_data()
+        info = LicenseManager.get_license_info()
+        key = info.get("key") or info.get("license_key")
+        exp = info.get("expiredate", "never")
         tier_lbl = LicenseManager.get_tier_label()
+        status_val = info.get("status", "active")
+        lic_id = info.get("id")
+        client_email = info.get("client_email", "")
+        activated_at = info.get("activated_at", "")
 
         card = tk.Frame(parent, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
         card.pack(fill=tk.X, pady=(0, 10))
 
-        tk.Label(card, text="Hardware Machine ID & License Details", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(card, text="Hardware Machine ID & Database License Details", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
 
         grid = tk.Frame(card, bg="#FFFFFF")
         grid.pack(fill=tk.X)
 
-        tk.Label(grid, text="Hardware / Machine ID:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=4)
-        tk.Label(grid, text=hw_id, font=get_sys_font(8, "bold"), fg="#0E7490", bg="#E0F2FE", padx=6, pady=2).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        tk.Label(grid, text="Hardware / Machine ID:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=3)
+        tk.Label(grid, text=hw_id, font=get_sys_font(8, "bold"), fg="#0E7490", bg="#E0F2FE", padx=6, pady=2).grid(row=0, column=1, sticky="w", padx=6, pady=3)
 
-        tk.Label(grid, text="License Edition:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=1, column=0, sticky="w", pady=4)
-        tk.Label(grid, text=f"{tier_lbl} Edition", font=get_sys_font(8, "bold"), fg="#047857", bg="#FFFFFF").grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        tk.Label(grid, text="Database Record ID:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=1, column=0, sticky="w", pady=3)
+        tk.Label(grid, text=str(lic_id) if lic_id else "N/A", font=get_sys_font(8), bg="#FFFFFF").grid(row=1, column=1, sticky="w", padx=6, pady=3)
 
-        tk.Label(grid, text="License Key:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=2, column=0, sticky="w", pady=4)
-        tk.Label(grid, text=key if key else "Not Activated", font=get_sys_font(8), bg="#FFFFFF").grid(row=2, column=1, sticky="w", padx=6, pady=4)
+        tk.Label(grid, text="License Key:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=2, column=0, sticky="w", pady=3)
+        tk.Label(grid, text=key if key else "Not Activated", font=get_sys_font(8), bg="#FFFFFF").grid(row=2, column=1, sticky="w", padx=6, pady=3)
 
-        tk.Label(grid, text="Expiry Date:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=3, column=0, sticky="w", pady=4)
-        tk.Label(grid, text=exp, font=get_sys_font(8, "bold"), fg="#047857" if exp != "expired" else "#DC2626", bg="#FFFFFF").grid(row=3, column=1, sticky="w", padx=6, pady=4)
+        tk.Label(grid, text="Status:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=3, column=0, sticky="w", pady=3)
+        status_color = "#047857" if status_val == "active" else "#DC2626"
+        tk.Label(grid, text=str(status_val).upper(), font=get_sys_font(8, "bold"), fg=status_color, bg="#FFFFFF").grid(row=3, column=1, sticky="w", padx=6, pady=3)
+
+        tk.Label(grid, text="License Edition (Tier):", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=4, column=0, sticky="w", pady=3)
+        tk.Label(grid, text=f"{tier_lbl} Edition", font=get_sys_font(8, "bold"), fg="#047857", bg="#FFFFFF").grid(row=4, column=1, sticky="w", padx=6, pady=3)
+
+        tk.Label(grid, text="Client Email:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=5, column=0, sticky="w", pady=3)
+        tk.Label(grid, text=client_email if client_email else "sales@a-b-infotech.in", font=get_sys_font(8), bg="#FFFFFF").grid(row=5, column=1, sticky="w", padx=6, pady=3)
+
+        tk.Label(grid, text="Activated At:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=6, column=0, sticky="w", pady=3)
+        tk.Label(grid, text=activated_at if activated_at else "N/A", font=get_sys_font(8), bg="#FFFFFF").grid(row=6, column=1, sticky="w", padx=6, pady=3)
+
+        tk.Label(grid, text="Expiry Date:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=7, column=0, sticky="w", pady=3)
+        tk.Label(grid, text=exp, font=get_sys_font(8, "bold"), fg="#047857" if exp != "expired" else "#DC2626", bg="#FFFFFF").grid(row=7, column=1, sticky="w", padx=6, pady=3)
 
         renew_box = tk.Frame(parent, bg="#F0FDF4", relief=tk.SOLID, bd=1, padx=12, pady=10)
         renew_box.pack(fill=tk.X)
-        tk.Label(renew_box, text="🔄 Renew or Upgrade License", font=get_sys_font(9, "bold"), fg="#065F46", bg="#F0FDF4").pack(anchor=tk.W)
+        tk.Label(renew_box, text="🔄 Check, Renew or Upgrade License", font=get_sys_font(9, "bold"), fg="#065F46", bg="#F0FDF4").pack(anchor=tk.W)
         tk.Label(renew_box, text="WhatsApp Support: +91 7016797720  |  Email: sales@a-b-infotech.in", font=get_sys_font(8), fg="#047857", bg="#F0FDF4").pack(anchor=tk.W, pady=(2, 6))
 
         r_btns = tk.Frame(renew_box, bg="#F0FDF4")
         r_btns.pack(anchor=tk.W)
+        ttk.Button(r_btns, text="🔄 Check & Sync with Database", style="Tool3D.TButton", command=self._check_and_sync_db).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(r_btns, text="🌐 Renew Online", style="Primary3D.TButton", command=lambda: webbrowser.open("https://pay.a-b-infotech.in/license.php")).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(r_btns, text="💬 WhatsApp: +91 7016797720", style="Tool3D.TButton", command=self.main_app.open_whatsapp).pack(side=tk.LEFT)
+
+    def _check_and_sync_db(self):
+        try:
+            res = LicenseManager.verify_with_database()
+            status = res.get('status', 'unknown')
+            if status == 'active':
+                messagebox.showinfo("License Verified", "✓ License verified and synchronized with database successfully!")
+            else:
+                messagebox.showwarning("License Notice", f"License check status: {status.upper()}.\nPlease contact support if you need assistance.")
+            self.dialog.destroy()
+            SettingsDialog(self.dialog.master, self.main_app, initial_tab=None)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to sync with database: {e}")
 
     def _build_drivers_tab(self, parent):
         canvas = tk.Canvas(parent, bg="#F1F5F9", bd=0, highlightthickness=0)
@@ -3249,8 +3673,8 @@ class VisualPdfSignerApp:
         left.pack(side=tk.LEFT, fill=tk.Y)
         left.pack_propagate(False)
 
-        tk.Label(left, text="Merge Multiple PDFs", font=get_sys_font(11, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
-        tk.Label(left, text="Add PDF files into queue, rearrange order, and merge into one.", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 8))
+        tk.Label(left, text="Merge Files (PDF, Word & Images)", font=get_sys_font(11, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(left, text="Upload PDF, Word documents (.docx/.doc), or Image files into queue, rearrange order, and merge into one PDF.", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF", wraplength=350, justify="left").pack(anchor=tk.W, pady=(0, 8))
 
         self.merge_pdf_list = []
         self.merge_listbox = tk.Listbox(left, height=10, font=get_sys_font(8), bd=1, relief=tk.SOLID)
@@ -3258,7 +3682,7 @@ class VisualPdfSignerApp:
         self.merge_listbox.bind("<<ListboxSelect>>", self._on_merge_select)
 
         btn_row = tk.Frame(left, bg="#FFFFFF"); btn_row.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(btn_row, text="➕ Add PDFs", style="Tool3D.TButton", command=self.merge_add_files).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_row, text="📁 Upload Files", style="Tool3D.TButton", command=self.merge_add_files).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_row, text="▲ Up", style="Tool3D.TButton", command=self.merge_move_up).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_row, text="▼ Down", style="Tool3D.TButton", command=self.merge_move_down).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_row, text="🗑️ Remove", style="Tool3D.TButton", command=self.merge_remove_file).pack(side=tk.LEFT, padx=2)
@@ -3272,22 +3696,51 @@ class VisualPdfSignerApp:
         self.merge_viewer = EmbeddedPdfViewer(right)
         self.merge_viewer.pack(fill=tk.BOTH, expand=True)
 
+    def _get_file_type_badge(self, fpath):
+        ext = os.path.splitext(fpath)[1].lower()
+        if ext == '.pdf':
+            return "📑 [PDF] "
+        elif ext in ['.docx', '.doc']:
+            return "📝 [WORD] "
+        elif ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.gif']:
+            return "🖼️ [IMG] "
+        return "📄 [FILE] "
+
     def merge_add_files(self):
-        files = filedialog.askopenfilenames(title="Select PDFs to Merge", filetypes=[("PDF", "*.pdf")])
+        file_filters = [
+            ("All Supported Files (*.pdf, *.docx, *.doc, Images)", "*.pdf;*.docx;*.doc;*.png;*.jpg;*.jpeg;*.bmp;*.tiff;*.webp;*.gif"),
+            ("PDF Documents (*.pdf)", "*.pdf"),
+            ("Word Documents (*.docx;*.doc)", "*.docx;*.doc"),
+            ("Image Files (*.png;*.jpg;*.jpeg;*.bmp;*.tiff;*.webp;*.gif)", "*.png;*.jpg;*.jpeg;*.bmp;*.tiff;*.webp;*.gif"),
+            ("All Files (*.*)", "*.*")
+        ]
+        files = filedialog.askopenfilenames(title="Upload Files to Merge (PDF, Word, Images)", filetypes=file_filters)
         if files:
             for f in files:
                 if f not in self.merge_pdf_list:
                     self.merge_pdf_list.append(f)
-                    self.merge_listbox.insert(tk.END, os.path.basename(f))
-            if self.merge_pdf_list:
-                self.merge_viewer.load_pdf(self.merge_pdf_list[-1])
+            self._refresh_merge_list(len(self.merge_pdf_list) - 1)
 
     def _on_merge_select(self, event):
         sel = self.merge_listbox.curselection()
         if sel:
             idx = sel[0]
             if idx < len(self.merge_pdf_list):
-                self.merge_viewer.load_pdf(self.merge_pdf_list[idx])
+                self._preview_merge_item(self.merge_pdf_list[idx])
+
+    def _preview_merge_item(self, fpath):
+        ext = os.path.splitext(fpath)[1].lower()
+        if ext == '.pdf':
+            self.merge_viewer.load_pdf(fpath)
+        else:
+            try:
+                pdf_bytes = convert_file_to_pdf_bytes(fpath)
+                tmp_p = os.path.join(tempfile.gettempdir(), f"abi_merge_prev_{abs(hash(fpath))}.pdf")
+                with open(tmp_p, 'wb') as tf:
+                    tf.write(pdf_bytes)
+                self.merge_viewer.load_pdf(tmp_p)
+            except Exception as e:
+                logger.debug(f"Preview non-pdf error: {e}")
 
     def merge_move_up(self):
         sel = self.merge_listbox.curselection()
@@ -3319,29 +3772,35 @@ class VisualPdfSignerApp:
     def _refresh_merge_list(self, new_sel=None):
         self.merge_listbox.delete(0, tk.END)
         for f in self.merge_pdf_list:
-            self.merge_listbox.insert(tk.END, os.path.basename(f))
+            badge = self._get_file_type_badge(f)
+            self.merge_listbox.insert(tk.END, f"{badge}{os.path.basename(f)}")
         if self.merge_pdf_list and new_sel is not None and new_sel < len(self.merge_pdf_list):
             self.merge_listbox.selection_set(new_sel)
-            self.merge_viewer.load_pdf(self.merge_pdf_list[new_sel])
+            self._preview_merge_item(self.merge_pdf_list[new_sel])
 
     def exec_merge(self):
         if len(self.merge_pdf_list) < 2:
-            messagebox.showwarning("Warning", "Please add at least 2 PDF files to merge."); return
-        out_p = filedialog.asksaveasfilename(title="Save Merged PDF As", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+            messagebox.showwarning("Warning", "Please upload at least 2 files to merge."); return
+        out_p = filedialog.asksaveasfilename(title="Save Merged PDF As", defaultextension=".pdf", filetypes=[("PDF Documents", "*.pdf")])
         if not out_p: return
 
         try:
             merged = fitz.open()
             for p in self.merge_pdf_list:
-                doc = fitz.open(p)
-                merged.insert_pdf(doc)
-                doc.close()
+                pdf_bytes = convert_file_to_pdf_bytes(p)
+                sub_doc = fitz.open("pdf", pdf_bytes)
+                merged.insert_pdf(sub_doc)
+                sub_doc.close()
             merged.save(out_p)
+            total_pages = len(merged)
             merged.close()
             self.merge_viewer.load_pdf(out_p)
-            messagebox.showinfo("Success", f"Merged {len(self.merge_pdf_list)} PDFs into:\n{out_p}")
+            messagebox.showinfo(
+                "Merge Complete",
+                f"✓ Successfully merged {len(self.merge_pdf_list)} file(s) into one PDF document ({total_pages} total pages):\n\n{out_p}"
+            )
         except Exception as e:
-            messagebox.showerror("Error", f"Merge failed: {e}")
+            messagebox.showerror("Merge Error", f"Merge failed: {e}")
 
     # =========================================================================
     # TAB 4: 🛡️ VERIFY (with Live PDF Viewer)

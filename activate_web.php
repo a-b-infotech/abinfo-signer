@@ -21,7 +21,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'browser_sync') {
     }
 
     try {
-        $stmt = $pdo->prepare("SELECT id, status, expiredate, license_tier, activated_at FROM license_keys WHERE license_key = :key LIMIT 1");
+        $stmt = $pdo->prepare("SELECT id, license_key, status, expiredate, license_tier, client_email, activated_at FROM license_keys WHERE license_key = :key LIMIT 1");
         $stmt->bindParam(':key', $license_key);
         $stmt->execute();
 
@@ -40,15 +40,21 @@ if (isset($_GET['action']) && $_GET['action'] === 'browser_sync') {
                     $upd->execute([':id' => $row['id']]);
                 }
                 $row['status'] = 'active';
+                $row['activated_at'] = date('Y-m-d H:i:s');
             }
 
+            $client_email = $row['client_email'] ?? '';
+            $activated_at = $row['activated_at'] ?? '';
+            $expiredate = !empty($row['expiredate']) ? $row['expiredate'] : 'never';
+            $id = $row['id'];
+
             if ($row['status'] !== 'active') {
-                header("Location: http://127.0.0.1:5000/api/sync_callback?status=inactive");
+                header("Location: http://127.0.0.1:5000/api/sync_callback?status=" . urlencode($row['status']) . "&id=" . urlencode($id) . "&key=" . urlencode($license_key) . "&tier=" . urlencode($tier) . "&client_email=" . urlencode($client_email) . "&activated_at=" . urlencode($activated_at) . "&expiredate=" . urlencode($expiredate));
             } 
             elseif (!empty($row['expiredate']) && $row['expiredate'] !== 'never' && strtotime($row['expiredate']) < time()) {
-                header("Location: http://127.0.0.1:5000/api/sync_callback?status=expired");
+                header("Location: http://127.0.0.1:5000/api/sync_callback?status=expired&id=" . urlencode($id) . "&key=" . urlencode($license_key) . "&tier=" . urlencode($tier) . "&client_email=" . urlencode($client_email) . "&activated_at=" . urlencode($activated_at) . "&expiredate=" . urlencode($expiredate));
             } else {
-                header("Location: http://127.0.0.1:5000/api/sync_callback?status=active&tier=" . urlencode($tier));
+                header("Location: http://127.0.0.1:5000/api/sync_callback?status=active&id=" . urlencode($id) . "&key=" . urlencode($license_key) . "&status_val=" . urlencode($row['status']) . "&tier=" . urlencode($tier) . "&client_email=" . urlencode($client_email) . "&activated_at=" . urlencode($activated_at) . "&expiredate=" . urlencode($expiredate));
             }
         } else {
             header("Location: http://127.0.0.1:5000/api/sync_callback?status=invalid");
@@ -70,14 +76,20 @@ if (isset($_GET['action']) && $_GET['action'] === 'verify_license') {
     if ($key === 'ABI-MASTER-PASS') {
         echo json_encode([
             'status' => 'active',
+            'id' => 1,
+            'license_key' => 'ABI-MASTER-PASS',
+            'status_val' => 'active',
             'tier' => 'pro',
+            'license_tier' => 'pro',
+            'client_email' => 'sales@a-b-infotech.in',
+            'activated_at' => date('Y-m-d H:i:s'),
             'expiredate' => 'never'
         ]);
         exit;
     }
 
     try {
-        $stmt = $pdo->prepare("SELECT status, expiredate, license_tier FROM license_keys WHERE license_key = :key LIMIT 1");
+        $stmt = $pdo->prepare("SELECT id, license_key, status, expiredate, license_tier, client_email, activated_at FROM license_keys WHERE license_key = :key LIMIT 1");
         $stmt->bindParam(':key', $key);
         $stmt->execute();
 
@@ -85,23 +97,38 @@ if (isset($_GET['action']) && $_GET['action'] === 'verify_license') {
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
             $tier = (!empty($row['license_tier']) && strtolower($row['license_tier']) === 'basic') ? 'basic' : 'pro';
             
-            if ($row['status'] !== 'active') {
-                echo json_encode(['status' => 'inactive']);
-            } 
-            elseif (!empty($row['expiredate']) && $row['expiredate'] !== 'never' && strtotime($row['expiredate']) < time()) {
-                echo json_encode(['status' => 'expired']);
-            } else {
-                echo json_encode([
-                    'status' => 'active',
-                    'tier' => $tier,
-                    'expiredate' => !empty($row['expiredate']) ? $row['expiredate'] : 'never'
-                ]);
+            if (strtolower($row['status']) === 'inactive') {
+                if (empty($row['expiredate']) || $row['expiredate'] === '0000-00-00 00:00:00') {
+                    $upd = $pdo->prepare("UPDATE license_keys SET status = 'active', activated_at = NOW(), expiredate = DATE_ADD(NOW(), INTERVAL 1 YEAR) WHERE id = :id");
+                    $upd->execute([':id' => $row['id']]);
+                    $row['expiredate'] = date('Y-m-d H:i:s', strtotime('+1 year'));
+                } else {
+                    $upd = $pdo->prepare("UPDATE license_keys SET status = 'active', activated_at = NOW() WHERE id = :id");
+                    $upd->execute([':id' => $row['id']]);
+                }
+                $row['status'] = 'active';
+                $row['activated_at'] = date('Y-m-d H:i:s');
             }
+
+            $is_expired = (!empty($row['expiredate']) && $row['expiredate'] !== 'never' && strtotime($row['expiredate']) < time());
+            $final_status = $is_expired ? 'expired' : $row['status'];
+
+            echo json_encode([
+                'status' => $final_status,
+                'id' => (int)$row['id'],
+                'license_key' => $row['license_key'],
+                'status_val' => $row['status'],
+                'tier' => $tier,
+                'license_tier' => $tier,
+                'client_email' => $row['client_email'] ?? '',
+                'activated_at' => $row['activated_at'] ?? '',
+                'expiredate' => !empty($row['expiredate']) ? $row['expiredate'] : 'never'
+            ]);
         } else {
             echo json_encode(['status' => 'invalid', 'message' => 'License key not found!']);
         }
     } catch (Exception $e) {
-        echo json_encode(['status' => 'error', 'message' => 'Database Error']);
+        echo json_encode(['status' => 'error', 'message' => 'Database Error: ' . $e->getMessage()]);
     }
     exit;
 }
@@ -117,7 +144,7 @@ if (empty($license_key)) {
 }
 
 try {
-    $query = "SELECT id, status, expiredate, license_tier, activated_at FROM license_keys WHERE license_key = :key LIMIT 1";
+    $query = "SELECT id, license_key, status, expiredate, license_tier, client_email, activated_at FROM license_keys WHERE license_key = :key LIMIT 1";
     $stmt = $pdo->prepare($query);
     $stmt->bindParam(':key', $license_key);
     $stmt->execute();
@@ -155,12 +182,23 @@ try {
         if (empty($row['activated_at']) || $row['activated_at'] === '0000-00-00 00:00:00') {
             $upd = $pdo->prepare("UPDATE license_keys SET activated_at = NOW() WHERE id = :id");
             $upd->execute([':id' => $row['id']]);
+            $row['activated_at'] = date('Y-m-d H:i:s');
         }
 
         $exp_date = !empty($row['expiredate']) ? $row['expiredate'] : 'never';
         $tier = (!empty($row['license_tier']) && strtolower($row['license_tier']) === 'basic') ? 'basic' : 'pro';
+        $client_email = $row['client_email'] ?? '';
+        $activated_at = $row['activated_at'] ?? '';
+        $id = $row['id'];
 
-        header("Location: http://127.0.0.1:5000/api/activate_callback?status=valid&key=" . urlencode($license_key) . "&expiredate=" . urlencode($exp_date) . "&tier=" . urlencode($tier));
+        header("Location: http://127.0.0.1:5000/api/activate_callback?status=valid"
+            . "&id=" . urlencode($id)
+            . "&key=" . urlencode($license_key)
+            . "&status_val=" . urlencode($row['status'])
+            . "&expiredate=" . urlencode($exp_date)
+            . "&tier=" . urlencode($tier)
+            . "&client_email=" . urlencode($client_email)
+            . "&activated_at=" . urlencode($activated_at));
         exit;
     } else {
         // If license key not found: send error
