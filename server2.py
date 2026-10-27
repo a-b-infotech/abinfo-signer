@@ -862,7 +862,7 @@ def sign_pdf():
 def draw_reportlab_layer(pdf_bytes, areas, cert):
     if not areas: return pdf_bytes
 
-    subj = cert.subject.rfc4514_string()
+    subj = cert.subject.rfc4514_string() if cert and hasattr(cert, 'subject') else ""
     def get_f(k):
         for p in subj.split(','):
             if p.strip().startswith(k+'='): return p.split('=', 1)[1].strip()
@@ -901,19 +901,34 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                 aw = float(area['width'])
                 ah = float(area['height'])
 
-                # 3D Drop Shadow
-                c.saveState()
-                c.setFillColor(HexColor('#0F172A'), alpha=0.10)
-                c.roundRect(ax + 2, ay - 2, aw, ah, 6, stroke=0, fill=1)
-                c.restoreState()
+                opts = area.get('opts', {})
+                heading = opts.get('heading', "Digitally signed by:")
+                extra_line = opts.get('extra_line', "")
+                reason_val = opts.get('reason', "")
+                location_val = opts.get('location', "")
+                show_name = opts.get('show_name', True)
+                show_date = opts.get('show_date', True)
+                show_reason = opts.get('show_reason', bool(reason_val))
+                show_location = opts.get('show_location', bool(location_val))
+                show_issuer = opts.get('show_issuer', False)
+                show_tick = opts.get('show_tick', True)
+                show_border = opts.get('show_border', True)
+                logo_path = opts.get('logo_path', None)
 
-                # Signature Box Background & Border (Clean subtle cyan-white tint)
-                c.saveState()
-                c.setFillColor(HexColor('#EBF6F9'), alpha=0.96)
-                c.setStrokeColor(HexColor('#0E7490'))
-                c.setLineWidth(1.2)
-                c.roundRect(ax, ay, aw, ah, 5, stroke=1, fill=1)
-                c.restoreState()
+                # 3D Drop Shadow & Box Border
+                if show_border:
+                    c.saveState()
+                    c.setFillColor(HexColor('#0F172A'), alpha=0.10)
+                    c.roundRect(ax + 2, ay - 2, aw, ah, 6, stroke=0, fill=1)
+                    c.restoreState()
+
+                    # Signature Box Background & Border (Clean subtle cyan-white tint)
+                    c.saveState()
+                    c.setFillColor(HexColor('#EBF6F9'), alpha=0.96)
+                    c.setStrokeColor(HexColor('#0E7490'))
+                    c.setLineWidth(1.2)
+                    c.roundRect(ax, ay, aw, ah, 5, stroke=1, fill=1)
+                    c.restoreState()
 
                 # Clip strictly to the box interior so text NEVER bleeds outside
                 c.saveState()
@@ -921,45 +936,71 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                 clip_p.roundRect(ax, ay, aw, ah, 5)
                 c.clipPath(clip_p, stroke=0, fill=0)
 
+                # Custom Logo insertion if specified
+                text_offset_x = 0
+                if logo_path and os.path.exists(logo_path):
+                    try:
+                        logo_w = min(aw * 0.28, ah * 0.8)
+                        logo_h = min(ah * 0.8, logo_w)
+                        c.drawImage(logo_path, ax + 6, ay + (ah - logo_h) / 2, width=logo_w, height=logo_h, preserveAspectRatio=True, mask='auto')
+                        text_offset_x = logo_w + 6
+                    except Exception as le:
+                        logger.warning(f"Error drawing signature logo image: {le}")
+
                 # Prominent Green Right Tick Mark (✔) Watermark on right side
-                c.saveState()
-                c.setStrokeColor(HexColor('#10B981'), alpha=0.45)
-                c.setLineWidth(max(ah * 0.10, 3.0))
-                c.setLineCap(1)  # Round cap
-                c.setLineJoin(1) # Round join
+                if show_tick:
+                    c.saveState()
+                    c.setStrokeColor(HexColor('#10B981'), alpha=0.45)
+                    c.setLineWidth(max(ah * 0.10, 3.0))
+                    c.setLineCap(1)  # Round cap
+                    c.setLineJoin(1) # Round join
 
-                bx = ax + aw * 0.78
-                by = ay + ah * 0.45
-                bsize = min(ah * 0.65, aw * 0.38)
+                    bx = ax + aw * 0.78
+                    by = ay + ah * 0.45
+                    bsize = min(ah * 0.65, aw * 0.38)
 
-                p_bg = c.beginPath()
-                p_bg.moveTo(bx - bsize * 0.44, by - bsize * 0.05)
-                p_bg.lineTo(bx - bsize * 0.12, by - bsize * 0.38)
-                p_bg.lineTo(bx + bsize * 0.44, by + bsize * 0.42)
-                c.drawPath(p_bg, stroke=1, fill=0)
-                c.restoreState()
+                    p_bg = c.beginPath()
+                    p_bg.moveTo(bx - bsize * 0.44, by - bsize * 0.05)
+                    p_bg.lineTo(bx - bsize * 0.12, by - bsize * 0.38)
+                    p_bg.lineTo(bx + bsize * 0.44, by + bsize * 0.42)
+                    c.drawPath(p_bg, stroke=1, fill=0)
+                    c.restoreState()
 
-                # Text Content Lines formatted exactly as requested
-                lines = [
-                    ('HEADER', "Digitally signed by:"),
-                    ('NAME', f"Name:- {cn_name}"),
-                ]
+                # Text Content Lines formatted dynamically
+                lines = []
+                if heading:
+                    lines.append(('HEADER', heading))
+                if show_name and cn_name:
+                    lines.append(('NAME', f"Name:- {cn_name}"))
+                if show_reason and reason_val:
+                    lines.append(('TEXT', f"Reason:- {reason_val}"))
+                if show_location and location_val:
+                    lines.append(('TEXT', f"Location:- {location_val}"))
                 if org_name and org_name != "N/A":
                     lines.append(('TEXT', f"Organization:- {org_name}"))
                 if unit_name and unit_name != "N/A":
                     lines.append(('TEXT', f"Unit:- {unit_name}"))
+                if show_issuer:
+                    iss_txt = org_name if org_name != "N/A" else "CCA Licensed CA"
+                    lines.append(('TEXT', f"Issuer:- {iss_txt}"))
                 if country and country != "N/A":
                     lines.append(('TEXT', f"Country:- {country}"))
                 if state and state != "N/A":
                     lines.append(('TEXT', f"State:- {state}"))
-                lines.append(('DATE', f"Date:- {now_ist}"))
+                if show_date:
+                    lines.append(('DATE', f"Date:- {now_ist}"))
+                if extra_line:
+                    lines.append(('EXTRA', f"{extra_line}"))
+
+                if not lines:
+                    lines = [('HEADER', "Digitally signed"), ('DATE', f"Date:- {now_ist}")]
 
                 n_lines = len(lines)
-                pad_x = max(aw * 0.04, 6.0)
+                pad_x = max(aw * 0.04, 6.0) + text_offset_x
                 pad_top = max(ah * 0.06, 3.5)
                 pad_bot = max(ah * 0.05, 3.5)
                 avail_h = max(ah - pad_top - pad_bot, 8.0)
-                avail_w = max(aw - (pad_x * 2.0), 20.0)
+                avail_w = max(aw - pad_x - max(aw * 0.04, 6.0), 20.0)
 
                 # Dynamic Scaling so ALL lines ALWAYS fit inside the box
                 max_fs_from_height = avail_h / float((n_lines - 1) * 1.18 + 1.0)
@@ -984,6 +1025,9 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
                     elif ltype == 'DATE':
                         c.setFont('Helvetica-Bold', max(fs * 0.95, 2.5))
                         c.setFillColor(HexColor('#1E3A8A'))
+                    elif ltype == 'EXTRA':
+                        c.setFont('Helvetica-Bold', max(fs * 0.95, 2.5))
+                        c.setFillColor(HexColor('#047857'))
                     else:
                         c.setFont('Helvetica', max(fs * 0.95, 2.5))
                         c.setFillColor(HexColor('#334155'))
@@ -1006,7 +1050,7 @@ def draw_reportlab_layer(pdf_bytes, areas, cert):
     writer.write(out)
     return out.getvalue()
 
-def sign_pdf_stream(pdf_bytes, areas, signer, cert_parsed, tst_client=None):
+def sign_pdf_stream(pdf_bytes, areas, signer, cert_parsed, tst_client=None, protect_opts=None):
     if not areas: return pdf_bytes
 
     visual_pdf_data = draw_reportlab_layer(pdf_bytes, areas, cert_parsed)
@@ -1084,7 +1128,671 @@ def sign_pdf_stream(pdf_bytes, areas, signer, cert_parsed, tst_client=None):
         signed_out.seek(0)
         current_io = signed_out
 
-    return current_io.getvalue()
+    signed_bytes = current_io.getvalue()
+    if protect_opts and protect_opts.get('enabled'):
+        try:
+            doc = fitz.open(stream=signed_bytes, filetype="pdf")
+            perm = fitz.PDF_PERM_ACCESSIBILITY
+            if protect_opts.get('allow_printing', True): perm |= fitz.PDF_PERM_PRINT
+            if protect_opts.get('allow_copying', True): perm |= fitz.PDF_PERM_COPY
+            if protect_opts.get('allow_editing', False): perm |= fitz.PDF_PERM_MODIFY
+            u_pw = protect_opts.get('open_password', '')
+            o_pw = protect_opts.get('permissions_password', u_pw or 'ABInfotechOwnerKey')
+            prot_io = io.BytesIO()
+            doc.save(
+                prot_io,
+                encryption=fitz.PDF_ENCRYPT_AES_256,
+                user_pw=u_pw,
+                owner_pw=o_pw,
+                permissions=perm
+            )
+            doc.close()
+            return prot_io.getvalue()
+        except Exception as pe:
+            logger.warning(f"Error applying post-signing protection: {pe}")
+
+    return signed_bytes
+
+# ==========================================
+# 3.5. PDF ALL-IN-ONE POWER SUITE ENGINES
+# ==========================================
+class WinCertStore:
+    """Enumerates certificates from Windows certificate store."""
+    @staticmethod
+    def get_certificates(store_name="MY"):
+        certs = []
+        if CURRENT_OS != 'Windows':
+            return certs
+        try:
+            import ssl
+            for cert_bytes, encoding_type, trust in ssl.enum_certificates(store_name):
+                try:
+                    cert = x509.load_der_x509_certificate(cert_bytes)
+                    cn = "Unknown"
+                    for attr in cert.subject:
+                        if attr.oid == x509.NameOID.COMMON_NAME:
+                            cn = attr.value
+                            break
+                    issuer_cn = "Unknown"
+                    for attr in cert.issuer:
+                        if attr.oid == x509.NameOID.COMMON_NAME:
+                            issuer_cn = attr.value
+                            break
+                    not_after = cert.not_valid_after_utc if hasattr(cert, 'not_valid_after_utc') else cert.not_valid_after
+                    certs.append({
+                        "common_name": cn,
+                        "issuer": issuer_cn,
+                        "serial_number": str(cert.serial_number),
+                        "expiry": not_after.strftime("%Y-%m-%d"),
+                        "cert_obj": cert,
+                        "cert_der": cert_bytes
+                    })
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"Error enumerating Windows cert store {store_name}: {e}")
+        return certs
+
+class PdfCompressor:
+    """Compresses PDF documents by optimizing streams and downsampling images."""
+    @staticmethod
+    def compress_pdf(input_path, output_path, level="medium", color_mode="color", progress_cb=None):
+        orig_size = os.path.getsize(input_path)
+        doc = fitz.open(input_path)
+        dpi_limit = 72 if level == "high" else (120 if level == "medium" else 150)
+        quality = 50 if level == "high" else (75 if level == "medium" else 85)
+        total_pages = len(doc)
+        for pno in range(total_pages):
+            if progress_cb:
+                progress_cb(pno + 1, total_pages)
+            page = doc[pno]
+            img_list = page.get_images(full=True)
+            for img_info in img_list:
+                xref = img_info[0]
+                try:
+                    base_img = doc.extract_image(xref)
+                    if not base_img:
+                        continue
+                    img_bytes = base_img["image"]
+                    pil_img = Image.open(io.BytesIO(img_bytes))
+                    if color_mode == "grayscale" and pil_img.mode != "L":
+                        pil_img = pil_img.convert("L")
+                    elif color_mode == "bw":
+                        pil_img = pil_img.convert("1")
+                    elif pil_img.mode in ("RGBA", "P"):
+                        pil_img = pil_img.convert("RGB")
+                    w, h = pil_img.size
+                    max_dim = int(dpi_limit * 11)
+                    if w > max_dim or h > max_dim:
+                        pil_img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+                    out_img_io = io.BytesIO()
+                    if pil_img.mode in ("RGB", "L"):
+                        pil_img.save(out_img_io, format="JPEG", quality=quality, optimize=True)
+                    else:
+                        pil_img.save(out_img_io, format="PNG", optimize=True)
+                    page.replace_image(xref, stream=out_img_io.getvalue())
+                except Exception:
+                    continue
+        doc.save(output_path, garbage=4, deflate=True, clean=True)
+        doc.close()
+        new_size = os.path.getsize(output_path)
+        saved_bytes = max(0, orig_size - new_size)
+        saved_pct = (saved_bytes / orig_size * 100.0) if orig_size > 0 else 0.0
+        return {
+            "orig_size": orig_size,
+            "new_size": new_size,
+            "saved_bytes": saved_bytes,
+            "saved_pct": saved_pct
+        }
+
+class PdfMerger:
+    """Merges multiple PDFs with support for custom page ranges."""
+    @staticmethod
+    def parse_page_range(range_str, max_pages):
+        range_str = (range_str or "").strip()
+        if not range_str or range_str.lower() in ("all", "*"):
+            return list(range(max_pages))
+        pages = []
+        for part in range_str.split(","):
+            part = part.strip()
+            if not part: continue
+            if "-" in part:
+                try:
+                    s, e = part.split("-", 1)
+                    s_int = max(1, int(s)) - 1
+                    e_int = min(max_pages, int(e)) - 1
+                    pages.extend(range(s_int, e_int + 1))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    p = int(part) - 1
+                    if 0 <= p < max_pages:
+                        pages.append(p)
+                except ValueError:
+                    pass
+        return sorted(list(set(pages))) if pages else list(range(max_pages))
+
+    @staticmethod
+    def merge_pdfs(file_configs, output_path, progress_cb=None):
+        merged_doc = fitz.open()
+        total = len(file_configs)
+        for idx, (fpath, prange) in enumerate(file_configs):
+            if progress_cb:
+                progress_cb(idx + 1, total)
+            if not os.path.exists(fpath):
+                continue
+            src = fitz.open(fpath)
+            selected_pages = PdfMerger.parse_page_range(prange, len(src))
+            for pno in selected_pages:
+                merged_doc.insert_pdf(src, from_page=pno, to_page=pno)
+            src.close()
+        merged_doc.save(output_path, garbage=3, deflate=True)
+        merged_doc.close()
+        return os.path.exists(output_path)
+
+class PdfStampManager:
+    """Applies graphical rubber stamp / company seal / watermark to PDF pages."""
+    @staticmethod
+    def apply_stamp(input_path, output_path, stamp_image_path, position_mode="bottom_right", 
+                    custom_rect=None, opacity=0.9, page_selection="all", target_page=1, stamp_size=(150, 60)):
+        doc = fitz.open(input_path)
+        with open(stamp_image_path, "rb") as img_f:
+            img_bytes = img_f.read()
+
+        total_pages = len(doc)
+        pages_to_stamp = []
+        if page_selection == "all":
+            pages_to_stamp = list(range(total_pages))
+        elif page_selection == "first":
+            pages_to_stamp = [0]
+        elif page_selection == "last":
+            pages_to_stamp = [total_pages - 1]
+        elif page_selection == "custom":
+            pno = max(0, min(total_pages - 1, target_page - 1))
+            pages_to_stamp = [pno]
+
+        sw, sh = stamp_size
+        for pno in pages_to_stamp:
+            page = doc[pno]
+            pw = page.rect.width
+            ph = page.rect.height
+
+            if position_mode == "custom" and custom_rect:
+                rect = fitz.Rect(custom_rect[0], custom_rect[1], custom_rect[0] + custom_rect[2], custom_rect[1] + custom_rect[3])
+            elif position_mode == "bottom_right":
+                rect = fitz.Rect(pw - sw - 36, ph - sh - 36, pw - 36, ph - 36)
+            elif position_mode == "bottom_left":
+                rect = fitz.Rect(36, ph - sh - 36, 36 + sw, ph - 36)
+            elif position_mode == "top_right":
+                rect = fitz.Rect(pw - sw - 36, 36, pw - 36, 36 + sh)
+            elif position_mode == "top_left":
+                rect = fitz.Rect(36, 36, 36 + sw, 36 + sh)
+            else: # center
+                rect = fitz.Rect((pw - sw) / 2, (ph - sh) / 2, (pw + sw) / 2, (ph + sh) / 2)
+
+            page.insert_image(rect, stream=img_bytes, keep_proportion=True, overlay=True)
+
+        doc.save(output_path, garbage=3, deflate=True)
+        doc.close()
+        return True
+
+class PdfVerifier:
+    """Validates digital signatures using PyHanko and Cryptography."""
+    @staticmethod
+    def verify_pdf(pdf_path):
+        if not os.path.exists(pdf_path):
+            return {"success": False, "has_signatures": False, "signatures": [], "message": "File not found."}
+
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PdfFileReader(f)
+                sig_fields = list(reader.embedded_signatures)
+                if not sig_fields:
+                    return {"success": True, "has_signatures": False, "signatures": [], "message": "No digital signatures found in this PDF document."}
+
+                results = []
+                all_valid = True
+                for sig in sig_fields:
+                    fname = sig.field_name
+                    try:
+                        val = validate_pdf_signature(sig)
+                        is_valid = bool(val.valid)
+                        is_intact = bool(val.intact)
+                        if not (is_valid and is_intact):
+                            all_valid = False
+
+                        signer_cert = val.signing_cert
+                        cn_name = "Unknown Signer"
+                        issuer_name = "Unknown CA"
+                        cert_serial = ""
+                        expiry_date = "N/A"
+                        if signer_cert:
+                            cert_serial = str(signer_cert.serial_number)
+                            for attr in signer_cert.subject:
+                                if attr.oid == x509.NameOID.COMMON_NAME:
+                                    cn_name = attr.value
+                                    break
+                            for attr in signer_cert.issuer:
+                                if attr.oid == x509.NameOID.COMMON_NAME:
+                                    issuer_name = attr.value
+                                    break
+                            not_after = signer_cert.not_valid_after_utc if hasattr(signer_cert, 'not_valid_after_utc') else signer_cert.not_valid_after
+                            expiry_date = not_after.strftime("%Y-%m-%d %H:%M UTC")
+
+                        has_tsa = False
+                        tsa_time_str = "No qualified timestamp embedded"
+                        if val.timestamp_validity and val.timestamp_validity.valid:
+                            has_tsa = True
+                            if val.timestamp_validity.timestamp:
+                                tsa_time_str = str(val.timestamp_validity.timestamp)
+
+                        results.append({
+                            "field_name": fname,
+                            "valid": is_valid,
+                            "intact": is_intact,
+                            "signer_cn": cn_name,
+                            "issuer_cn": issuer_name,
+                            "serial": cert_serial,
+                            "expiry": expiry_date,
+                            "has_tsa": has_tsa,
+                            "tsa_time": tsa_time_str,
+                            "summary": "Valid & Intact (Document unmodified)" if (is_valid and is_intact) else "Invalid or Modified"
+                        })
+                    except Exception as ve:
+                        all_valid = False
+                        results.append({
+                            "field_name": fname,
+                            "valid": False,
+                            "intact": False,
+                            "signer_cn": "Error Parsing",
+                            "issuer_cn": "Error Parsing",
+                            "serial": "",
+                            "expiry": "N/A",
+                            "has_tsa": False,
+                            "tsa_time": "N/A",
+                            "summary": f"Verification error: {ve}"
+                        })
+
+                msg = f"Verified {len(results)} digital signature(s). {'All signatures are VALID & document is INTACT.' if all_valid else 'One or more signatures are invalid or modified.'}"
+                return {
+                    "success": True,
+                    "has_signatures": True,
+                    "all_valid": all_valid,
+                    "signatures": results,
+                    "message": msg
+                }
+        except Exception as e:
+            return {"success": False, "has_signatures": False, "signatures": [], "message": f"Error validating PDF signatures: {e}"}
+
+class PdfToolsManager:
+    """PDF Utilities: Split, Rotate, Extract, Delete, AES-256 Encrypt & Decrypt."""
+    @staticmethod
+    def split_pdf(input_path, output_dir, mode="single", ranges=""):
+        doc = fitz.open(input_path)
+        base = Path(input_path).stem
+        created = []
+        if mode == "single":
+            for i, page in enumerate(doc):
+                out_p = os.path.join(output_dir, f"{base}_page_{i+1}.pdf")
+                new_d = fitz.open()
+                new_d.insert_pdf(doc, from_page=i, to_page=i)
+                new_d.save(out_p)
+                new_d.close()
+                created.append(out_p)
+        else:
+            parts = [p.strip() for p in ranges.split(",") if p.strip()]
+            for idx, p_str in enumerate(parts):
+                if "-" in p_str:
+                    s, e = p_str.split("-", 1)
+                    s_int = max(0, int(s) - 1)
+                    e_int = min(len(doc) - 1, int(e) - 1)
+                else:
+                    s_int = e_int = max(0, min(len(doc) - 1, int(p_str) - 1))
+                out_p = os.path.join(output_dir, f"{base}_part_{idx+1}_p{s_int+1}-{e_int+1}.pdf")
+                new_d = fitz.open()
+                new_d.insert_pdf(doc, from_page=s_int, to_page=e_int)
+                new_d.save(out_p)
+                new_d.close()
+                created.append(out_p)
+        doc.close()
+        return created
+
+    @staticmethod
+    def rotate_pdf(input_path, output_path, angle=90, page_selection="all", specific_pages=""):
+        doc = fitz.open(input_path)
+        total = len(doc)
+        if page_selection == "all":
+            pages = list(range(total))
+        elif page_selection == "even":
+            pages = [i for i in range(total) if (i + 1) % 2 == 0]
+        elif page_selection == "odd":
+            pages = [i for i in range(total) if (i + 1) % 2 != 0]
+        elif page_selection == "specific":
+            pages = PdfMerger.parse_page_range(specific_pages, total)
+        else:
+            pages = list(range(total))
+        for pno in pages:
+            doc[pno].set_rotation(doc[pno].rotation + angle)
+        doc.save(output_path, garbage=3, deflate=True)
+        doc.close()
+        return True
+
+    @staticmethod
+    def extract_pages(input_path, output_path, page_range_str):
+        doc = fitz.open(input_path)
+        selected = PdfMerger.parse_page_range(page_range_str, len(doc))
+        new_d = fitz.open()
+        for pno in selected:
+            new_d.insert_pdf(doc, from_page=pno, to_page=pno)
+        new_d.save(output_path, garbage=3, deflate=True)
+        new_d.close()
+        doc.close()
+        return True
+
+    @staticmethod
+    def delete_pages(input_path, output_path, page_range_str):
+        doc = fitz.open(input_path)
+        to_del = set(PdfMerger.parse_page_range(page_range_str, len(doc)))
+        to_keep = [i for i in range(len(doc)) if i not in to_del]
+        if not to_keep:
+            doc.close()
+            raise ValueError("Cannot delete all pages from PDF!")
+        new_d = fitz.open()
+        for pno in to_keep:
+            new_d.insert_pdf(doc, from_page=pno, to_page=pno)
+        new_d.save(output_path, garbage=3, deflate=True)
+        new_d.close()
+        doc.close()
+        return True
+
+    @staticmethod
+    def protect_pdf(input_path, output_path, user_pw, owner_pw, allow_print=True, allow_copy=True, allow_edit=False):
+        doc = fitz.open(input_path)
+        perm = fitz.PDF_PERM_ACCESSIBILITY
+        if allow_print: perm |= fitz.PDF_PERM_PRINT
+        if allow_copy: perm |= fitz.PDF_PERM_COPY
+        if allow_edit: perm |= fitz.PDF_PERM_MODIFY
+        doc.save(
+            output_path,
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            user_pw=user_pw,
+            owner_pw=owner_pw or user_pw or "owner_key",
+            permissions=perm
+        )
+        doc.close()
+        return True
+
+    @staticmethod
+    def unlock_pdf(input_path, output_path, password):
+        doc = fitz.open(input_path)
+        if doc.is_encrypted:
+            if not doc.authenticate(password):
+                doc.close()
+                raise ValueError("Incorrect password for protected PDF.")
+        doc.save(output_path, encryption=fitz.PDF_ENCRYPT_NONE)
+        doc.close()
+        return True
+
+class PdfOcrEditManager:
+    """PDF OCR Text Extraction, Redaction & Watermarking."""
+    @staticmethod
+    def extract_text_and_ocr(input_path, output_txt_path=None, page_range="all"):
+        doc = fitz.open(input_path)
+        total = len(doc)
+        pages = PdfMerger.parse_page_range(page_range, total)
+        lines = []
+        for pno in pages:
+            page = doc[pno]
+            txt = page.get_text("text")
+            if not txt.strip():
+                try:
+                    tp = page.get_textpage_ocr(flags=0, full=True)
+                    txt = tp.extractText()
+                except Exception:
+                    pass
+            lines.append(f"=== [ PAGE {pno+1} ] ===\n" + (txt if txt.strip() else "[No text content found on this page]"))
+        doc.close()
+        full = "\n\n".join(lines)
+        if output_txt_path:
+            with open(output_txt_path, "w", encoding="utf-8") as f:
+                f.write(full)
+        return full
+
+    @staticmethod
+    def search_and_redact(input_path, output_path, search_term, replace_text="", fill_color=(0, 0, 0)):
+        doc = fitz.open(input_path)
+        count = 0
+        for page in doc:
+            rects = page.search_for(search_term)
+            for r in rects:
+                page.add_redact_annot(r, text=replace_text, fill=fill_color)
+                count += 1
+            if rects:
+                page.apply_redactions()
+        doc.save(output_path, garbage=3, deflate=True)
+        doc.close()
+        return count
+
+    @staticmethod
+    def add_watermark(input_path, output_path, watermark_text="CONFIDENTIAL", opacity=0.3, font_size=42, angle=45, color=(0.8, 0.2, 0.2)):
+        doc = fitz.open(input_path)
+        for page in doc:
+            pw = page.rect.width
+            ph = page.rect.height
+            rect = fitz.Rect(pw * 0.1, ph * 0.2, pw * 0.9, ph * 0.8)
+            page.insert_textbox(
+                rect,
+                watermark_text,
+                fontsize=font_size,
+                fontname="helv",
+                rotate=angle,
+                color=color,
+                align=fitz.TEXT_ALIGN_CENTER
+            )
+        doc.save(output_path, garbage=3, deflate=True)
+        doc.close()
+        return True
+
+class SignatureAreaPickerWindow:
+    """Interactive visual dialog to preview PDF page and choose signature / stamp position."""
+    def __init__(self, parent, pdf_path, on_area_selected, initial_area=None, title="Choose Position & Size on Page"):
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(title)
+        self.dialog.geometry("1100x820")
+        self.dialog.minsize(820, 600)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.pdf_path = pdf_path
+        self.on_area_selected = on_area_selected
+        self.current_page = 0
+        self.doc = fitz.open(pdf_path)
+        self.total_pages = len(self.doc)
+        self.scale = 1.2
+        self.drawing_mode = True
+        self.start_x = 0
+        self.start_y = 0
+        self.temp_rect = None
+        self.selected_area = initial_area.copy() if initial_area else {}
+        if self.selected_area and 'page' in self.selected_area:
+            self.current_page = min(self.total_pages - 1, max(0, int(self.selected_area['page'])))
+
+        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._build_ui()
+        self.render_page()
+
+    def _build_ui(self):
+        top_bar = tk.Frame(self.dialog, bg="#1E3A8A", padx=10, pady=8)
+        top_bar.pack(side=tk.TOP, fill=tk.X)
+
+        self.btn_prev = ttk.Button(top_bar, text="◀ Prev Page", command=self.prev_page, style="Tool3D.TButton")
+        self.btn_prev.pack(side=tk.LEFT, padx=3)
+        self.lbl_page = tk.Label(top_bar, text=f"Page {self.current_page+1} / {self.total_pages}", font=get_sys_font(9, "bold"), bg="#1E40AF", fg="#FFFFFF", padx=8, pady=3, relief=tk.SUNKEN, bd=1)
+        self.lbl_page.pack(side=tk.LEFT, padx=4)
+        self.btn_next = ttk.Button(top_bar, text="Next Page ▶", command=self.next_page, style="Tool3D.TButton")
+        self.btn_next.pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(top_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        tk.Label(top_bar, text="Presets:", font=get_sys_font(9, "bold"), fg="#93C5FD", bg="#1E3A8A").pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Button(top_bar, text="📍 Bottom-Right (DSC)", command=lambda: self.apply_preset("bottom_right"), style="Tool3D.TButton").pack(side=tk.LEFT, padx=2)
+        ttk.Button(top_bar, text="📍 Bottom-Left", command=lambda: self.apply_preset("bottom_left"), style="Tool3D.TButton").pack(side=tk.LEFT, padx=2)
+        ttk.Button(top_bar, text="📍 Top-Right", command=lambda: self.apply_preset("top_right"), style="Tool3D.TButton").pack(side=tk.LEFT, padx=2)
+        ttk.Button(top_bar, text="📍 Center", command=lambda: self.apply_preset("center"), style="Tool3D.TButton").pack(side=tk.LEFT, padx=2)
+
+        ttk.Button(top_bar, text="🔍 Zoom +", command=self.zoom_in, style="Tool3D.TButton").pack(side=tk.LEFT, padx=4)
+        ttk.Button(top_bar, text="🔍 Zoom -", command=self.zoom_out, style="Tool3D.TButton").pack(side=tk.LEFT, padx=2)
+
+        btn_cancel = ttk.Button(top_bar, text="Cancel", command=self._on_close, style="Tool3D.TButton")
+        btn_cancel.pack(side=tk.RIGHT, padx=4)
+
+        btn_apply = ttk.Button(top_bar, text="✅ Set Selected Position", command=self.apply_and_close, style="Primary3D.TButton")
+        btn_apply.pack(side=tk.RIGHT, padx=6)
+
+        info_bar = tk.Frame(self.dialog, bg="#F0F4F8", padx=10, pady=4, relief=tk.GROOVE, bd=1)
+        info_bar.pack(side=tk.TOP, fill=tk.X)
+        self.lbl_info = tk.Label(info_bar, text="👉 Click & drag on page to draw custom box, or choose a preset above.", font=get_sys_font(9), fg="#1E40AF", bg="#F0F4F8")
+        self.lbl_info.pack(side=tk.LEFT)
+
+        canvas_outer = tk.Frame(self.dialog, bg="#94A3B8")
+        canvas_outer.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas_vscroll = ttk.Scrollbar(canvas_outer, orient=tk.VERTICAL)
+        self.canvas_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas_hscroll = ttk.Scrollbar(canvas_outer, orient=tk.HORIZONTAL)
+        self.canvas_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.canvas = tk.Canvas(canvas_outer, bg="#94A3B8", xscrollcommand=self.canvas_hscroll.set, yscrollcommand=self.canvas_vscroll.set, highlightthickness=0)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas_vscroll.config(command=self.canvas.yview)
+        self.canvas_hscroll.config(command=self.canvas.xview)
+
+        self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
+        self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
+
+    def _on_close(self):
+        try: self.doc.close()
+        except Exception: pass
+        self.dialog.destroy()
+
+    def zoom_in(self):
+        self.scale = min(2.5, self.scale + 0.2)
+        self.render_page()
+
+    def zoom_out(self):
+        self.scale = max(0.6, self.scale - 0.2)
+        self.render_page()
+
+    def prev_page(self):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.render_page()
+
+    def next_page(self):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.render_page()
+
+    def render_page(self):
+        self.canvas.delete("all")
+        page = self.doc[self.current_page]
+        mat = fitz.Matrix(self.scale, self.scale)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        self.tk_img = ImageTk.PhotoImage(img)
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_img)
+        self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
+        self.lbl_page.config(text=f"Page {self.current_page+1} / {self.total_pages}")
+
+        # Render selected box if exists on this page
+        if self.selected_area and int(self.selected_area.get('page', 0)) == self.current_page:
+            real_h = page.rect.height
+            px1 = float(self.selected_area['x']) * self.scale
+            pw = float(self.selected_area['width']) * self.scale
+            ph = float(self.selected_area['height']) * self.scale
+            py1 = (real_h - float(self.selected_area['y']) - float(self.selected_area['height'])) * self.scale
+            px2 = px1 + pw
+            py2 = py1 + ph
+
+            # Draw outer shadow & box
+            self.canvas.create_rectangle(px1+2, py1+2, px2+2, py2+2, fill="#0F172A", stipple="gray25", outline="")
+            self.canvas.create_rectangle(px1, py1, px2, py2, fill="#E0F2FE", outline="#0284C7", width=2, stipple="gray50")
+            self.canvas.create_text((px1+px2)/2, (py1+py2)/2, text="✍️ Signature / Stamp Area", fill="#0369A1", font=get_sys_font(9, "bold"))
+            self.lbl_info.config(
+                text=f"✓ Selected Box: X={int(self.selected_area['x'])}pt, Y={int(self.selected_area['y'])}pt | W={int(self.selected_area['width'])}pt, H={int(self.selected_area['height'])}pt (Page {self.current_page+1})",
+                fg="#047857"
+            )
+
+    def apply_preset(self, preset):
+        page = self.doc[self.current_page]
+        pw = page.rect.width
+        ph = page.rect.height
+        w = 160.0
+        h = 65.0
+        margin = 36.0
+
+        if preset == "bottom_right":
+            x = pw - w - margin
+            y = margin
+        elif preset == "bottom_left":
+            x = margin
+            y = margin
+        elif preset == "top_right":
+            x = pw - w - margin
+            y = ph - h - margin
+        elif preset == "top_left":
+            x = margin
+            y = ph - h - margin
+        else: # center
+            x = (pw - w) / 2.0
+            y = (ph - h) / 2.0
+
+        self.selected_area = {
+            'page': self.current_page,
+            'x': x, 'y': y,
+            'width': w, 'height': h
+        }
+        self.render_page()
+
+    def on_mouse_down(self, event):
+        self.start_x = self.canvas.canvasx(event.x)
+        self.start_y = self.canvas.canvasy(event.y)
+        self.temp_rect = self.canvas.create_rectangle(
+            self.start_x, self.start_y, self.start_x, self.start_y,
+            outline="#0284C7", width=2, dash=(4, 4)
+        )
+
+    def on_mouse_drag(self, event):
+        if not self.temp_rect: return
+        self.canvas.coords(self.temp_rect, self.start_x, self.start_y, self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+
+    def on_mouse_up(self, event):
+        if not self.temp_rect: return
+        cur_x, cur_y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        x1, x2 = sorted([self.start_x, cur_x])
+        y1, y2 = sorted([self.start_y, cur_y])
+        self.canvas.delete(self.temp_rect)
+        self.temp_rect = None
+
+        if (x2 - x1) < 15 or (y2 - y1) < 15: return
+
+        real_h = self.doc[self.current_page].rect.height
+        pdf_x1, pdf_y1, pdf_x2, pdf_y2 = x1/self.scale, y1/self.scale, x2/self.scale, y2/self.scale
+        self.selected_area = {
+            'page': self.current_page,
+            'x': pdf_x1, 'y': real_h - pdf_y2,
+            'width': pdf_x2 - pdf_x1, 'height': (real_h - pdf_y1) - (real_h - pdf_y2)
+        }
+        self.render_page()
+
+    def apply_and_close(self):
+        if not self.selected_area:
+            self.apply_preset("bottom_right")
+        self.on_area_selected(self.selected_area)
+        self._on_close()
+
 
 # ==========================================
 # 4. CROSS-PLATFORM DESKTOP APP (Tkinter GUI)
@@ -1096,34 +1804,155 @@ class VisualPdfSignerApp:
         gui_root = self.root
         gui_app = self
 
-        self.root.title(f"A B INFOTECH - Local Digital Signer v1.1 [{CURRENT_OS}]")
-        self.root.geometry("1300x850")
-        self.root.minsize(1024, 700)
+        self.root.title(f"A B INFOTECH - PDF Sign & All-in-One Power Suite v2.0 [{CURRENT_OS}]")
+        self.root.geometry("1340x880")
+        self.root.minsize(1080, 720)
         self.root.protocol('WM_DELETE_WINDOW', self.on_window_close)
 
         self._configure_styles()
         self._apply_window_icon(self.root)
 
-        self.pdf_doc = None
-        self.input_pdf_path = None
-        self.current_page = 0
-        self.scale = 1.35
-        self.drawing_mode = False
-        self.start_x = 0; self.start_y = 0; self.temp_rect = None
-        self.signature_areas = []
-        self.loaded_certs = []
-        self.just_activated = False
+        # ------------------------------------------
+        # State: Tab 1 (Sign PDF)
+        # ------------------------------------------
+        self.sign_pdf_files = []
+        self.sign_output_mode = tk.StringVar(value="beside")  # 'beside' or 'folder'
+        self.sign_output_folder = tk.StringVar(value="")
+        self.sign_flatten_old = tk.BooleanVar(value=False)
 
-        # Bulk Signing Mode State
+        # Certificate Settings
+        self.cert_source_var = tk.StringVar(value="token" if DRIVER_MAP and list(DRIVER_MAP.keys())[0] != "[Browse Custom Driver Library...]" else "pfx")
+        self.driver_var = tk.StringVar()
+        self.pin_var = tk.StringVar()
+        self.token_certs = []
+
+        self.pfx_path_var = tk.StringVar()
+        self.pfx_pass_var = tk.StringVar()
+        self.pfx_loaded_cert = None
+
+        self.win_store_var = tk.StringVar(value="MY")
+        self.win_store_certs = []
+
+        # Signature Details
+        self.sign_reason_var = tk.StringVar(value="I approve this document")
+        self.sign_location_var = tk.StringVar(value="India")
+        self.sign_contact_var = tk.StringVar(value="")
+        self.sign_hash_var = tk.StringVar(value="SHA-256")
+        self.sign_tsa_var = tk.StringVar(value="DigiCert TSA (Recommended)")
+        self.sign_type_var = tk.StringVar(value="Approval signature (normal)")
+
+        # Appearance Details
+        self.chk_visible_sig = tk.BooleanVar(value=True)
+        self.sign_page_mode = tk.StringVar(value="all")  # 'all', 'each', 'first', 'last', 'specific'
+        self.sign_page_num_var = tk.StringVar(value="1")
+        self.sign_selected_area = {'x': 400.0, 'y': 36.0, 'width': 160.0, 'height': 65.0, 'page': 0}
+        self.chk_name_var = tk.BooleanVar(value=True)
+        self.chk_date_var = tk.BooleanVar(value=True)
+        self.chk_reason_var = tk.BooleanVar(value=True)
+        self.chk_loc_var = tk.BooleanVar(value=True)
+        self.chk_issuer_var = tk.BooleanVar(value=False)
+        self.chk_tick_var = tk.BooleanVar(value=True)
+        self.chk_border_var = tk.BooleanVar(value=True)
+        self.sign_heading_var = tk.StringVar(value="Digitally signed by:")
+        self.sign_extra_line_var = tk.StringVar(value="A B INFOTECH")
+        self.sign_logo_path_var = tk.StringVar(value="")
+
+        # Protection Details
+        self.chk_protect_var = tk.BooleanVar(value=False)
+        self.protect_open_pw_var = tk.StringVar(value="")
+        self.protect_perm_pw_var = tk.StringVar(value="")
+        self.chk_allow_print = tk.BooleanVar(value=True)
+        self.chk_allow_copy = tk.BooleanVar(value=True)
+        self.chk_allow_edit = tk.BooleanVar(value=False)
+
+        # ------------------------------------------
+        # State: Tab 2 (Image Stamp)
+        # ------------------------------------------
+        self.stamp_pdf_files = []
+        self.stamp_img_path = tk.StringVar(value="")
+        self.stamp_pos_mode = tk.StringVar(value="bottom_right")
+        self.stamp_custom_rect = None
+        self.stamp_page_scope = tk.StringVar(value="all")
+        self.stamp_page_num = tk.StringVar(value="1")
+        self.stamp_width_var = tk.StringVar(value="150")
+        self.stamp_height_var = tk.StringVar(value="60")
+        self.stamp_opacity_var = tk.DoubleVar(value=90.0)
+        self.stamp_out_mode = tk.StringVar(value="beside")
+        self.stamp_out_dir = tk.StringVar(value="")
+
+        # ------------------------------------------
+        # State: Tab 3 (Compress)
+        # ------------------------------------------
+        self.compress_pdf_files = []
+        self.compress_level_var = tk.StringVar(value="medium")
+        self.compress_color_var = tk.StringVar(value="color")
+        self.compress_out_mode = tk.StringVar(value="beside")
+        self.compress_out_dir = tk.StringVar(value="")
+
+        # ------------------------------------------
+        # State: Tab 4 (Merge)
+        # ------------------------------------------
+        self.merge_pdf_items = []
+        self.merge_out_path = tk.StringVar(value="")
+
+        # ------------------------------------------
+        # State: Tab 5 (Verify)
+        # ------------------------------------------
+        self.verify_pdf_path = tk.StringVar(value="")
+
+        # ------------------------------------------
+        # State: Tab 6 (Tools)
+        # ------------------------------------------
+        self.tool_split_pdf = tk.StringVar()
+        self.tool_split_mode = tk.StringVar(value="single")
+        self.tool_split_ranges = tk.StringVar(value="1-3, 4-6")
+        self.tool_split_out_dir = tk.StringVar()
+
+        self.tool_rot_pdf = tk.StringVar()
+        self.tool_rot_angle = tk.IntVar(value=90)
+        self.tool_rot_scope = tk.StringVar(value="all")
+        self.tool_rot_spec = tk.StringVar(value="")
+
+        self.tool_ext_pdf = tk.StringVar()
+        self.tool_ext_pages = tk.StringVar(value="1-3")
+
+        self.tool_del_pdf = tk.StringVar()
+        self.tool_del_pages = tk.StringVar(value="2")
+
+        self.tool_prot_pdf = tk.StringVar()
+        self.tool_prot_open = tk.StringVar()
+        self.tool_prot_perm = tk.StringVar()
+        self.tool_prot_print = tk.BooleanVar(value=True)
+        self.tool_prot_copy = tk.BooleanVar(value=True)
+        self.tool_prot_edit = tk.BooleanVar(value=False)
+
+        self.tool_unl_pdf = tk.StringVar()
+        self.tool_unl_pw = tk.StringVar()
+
+        # ------------------------------------------
+        # State: Tab 7 (OCR & Edit)
+        # ------------------------------------------
+        self.ocr_pdf_path = tk.StringVar()
+        self.ocr_page_scope = tk.StringVar(value="all")
+
+        self.redact_pdf_path = tk.StringVar()
+        self.redact_term_var = tk.StringVar()
+        self.redact_mode_var = tk.StringVar(value="blackout")
+        self.redact_replace_var = tk.StringVar()
+
+        self.wm_pdf_path = tk.StringVar()
+        self.wm_text_var = tk.StringVar(value="CONFIDENTIAL")
+        self.wm_angle_var = tk.IntVar(value=45)
+        self.wm_opacity_var = tk.DoubleVar(value=30.0)
+
+        # Legacy backward-compatibility states
         self.bulk_mode = False
         self.bulk_in_dir = None
         self.bulk_out_dir = None
         self.bulk_pdf_files = []
-
-        self.cert_source_var = tk.StringVar(value="pfx" if not DRIVER_MAP or list(DRIVER_MAP.keys())[0] == "[Browse Custom Driver Library...]" else "token")
-        self.pfx_path_var = tk.StringVar()
-        self.pfx_pass_var = tk.StringVar()
+        self.signature_areas = []
         self.all_pages_var = tk.BooleanVar(value=True)
+        self.just_activated = False
 
         if not LicenseManager.is_activated():
             self._show_activation_screen()
@@ -1149,10 +1978,10 @@ class VisualPdfSignerApp:
 
         style.configure("TLabel", font=f_normal)
         style.configure("TButton", font=f_normal)
-        style.configure("Header.TLabel", font=get_sys_font(14, "bold"), foreground="#1E40AF")
+        style.configure("Header.TLabel", font=get_sys_font(13, "bold"), foreground="#1E40AF")
         style.configure("Toolbar.TFrame", background="#F1F5F9")
 
-        # 3D Push Button Styles with Directional Lighting & Light Shadow Emulation
+        # 3D Push Button Styles
         style.configure("Primary3D.TButton", font=get_sys_font(10, "bold"),
             background="#059669", foreground="#FFFFFF", borderwidth=1, focuscolor="none",
             lightcolor="#34D399", darkcolor="#047857"
@@ -1185,29 +2014,28 @@ class VisualPdfSignerApp:
             darkcolor=[("pressed", "#60A5FA"), ("active", "#1E3A8A")]
         )
 
-        style.configure("Draw3D.TButton", font=f_bold,
-            background="#D97706", foreground="#FFFFFF", borderwidth=1, focuscolor="none",
-            lightcolor="#FBBF24", darkcolor="#B45309"
+        style.configure("BuyDSC.TButton", font=get_sys_font(9, "bold"),
+            background="#16A34A", foreground="#FFFFFF", borderwidth=1, focuscolor="none",
+            lightcolor="#4ADE80", darkcolor="#15803D"
         )
-        style.map("Draw3D.TButton",
-            background=[("pressed", "#B45309"), ("active", "#F59E0B")],
-            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")],
-            lightcolor=[("pressed", "#B45309"), ("active", "#FDE68A")],
-            darkcolor=[("pressed", "#FBBF24"), ("active", "#92400E")]
+        style.map("BuyDSC.TButton",
+            background=[("pressed", "#15803D"), ("active", "#22C55E")],
+            foreground=[("pressed", "#FFFFFF"), ("active", "#FFFFFF")]
+        )
+
+        style.configure("TNotebook", background="#F1F5F9", tabmargins=[4, 4, 4, 0])
+        style.configure("TNotebook.Tab", font=get_sys_font(9, "bold"), padding=[14, 6], background="#E2E8F0", foreground="#334155")
+        style.map("TNotebook.Tab",
+            background=[("selected", "#FFFFFF"), ("active", "#F8FAFC")],
+            foreground=[("selected", "#1E3A8A"), ("active", "#1E40AF")]
         )
 
     def _create_3d_card(self, parent, bg="#FFFFFF", shadow_color="#CBD5E1", highlight_color="#FFFFFF", pady=(0, 6)):
-        """
-        Creates an illuminated 3D card with dual-layer physical lighting:
-        - Outer light shadow (#CBD5E1) creates floating ambient elevation
-        - Top/left specular highlight (#FFFFFF) simulates directional lighting reflection
-        - Inner raised card face creates true tactile 3D depth
-        """
         shadow = tk.Frame(parent, bg=shadow_color, bd=0)
-        shadow.pack(fill=tk.X, pady=pady)
+        shadow.pack(fill=tk.BOTH if pady == "fill" else tk.X, pady=0 if pady == "fill" else pady)
         bevel = tk.Frame(shadow, bg=highlight_color, bd=0)
         bevel.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        card = tk.Frame(bevel, bg=bg, relief=tk.RAISED, bd=1, padx=9, pady=6)
+        card = tk.Frame(bevel, bg=bg, relief=tk.RAISED, bd=1, padx=8, pady=6)
         card.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
         card.shadow = shadow
         card.bevel = bevel
@@ -1217,8 +2045,6 @@ class VisualPdfSignerApp:
         try:
             if CURRENT_OS == 'Windows':
                 window.state('zoomed')
-            elif CURRENT_OS == 'Darwin':
-                window.attributes('-zoomed', True)
             else:
                 window.attributes('-zoomed', True)
         except Exception:
@@ -1237,7 +2063,6 @@ class VisualPdfSignerApp:
                         return
                     except Exception:
                         pass
-                # Cross-platform iconphoto via PIL
                 pil_icon = Image.open(icon_file)
                 self.window_icon = ImageTk.PhotoImage(pil_icon)
                 window.iconphoto(True, self.window_icon)
@@ -1266,7 +2091,7 @@ class VisualPdfSignerApp:
                 self.root.attributes('-topmost', False)
                 try:
                     hwnd = self.root.winfo_id()
-                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)
                     ctypes.windll.user32.SetForegroundWindow(hwnd)
                 except Exception:
                     pass
@@ -1274,7 +2099,6 @@ class VisualPdfSignerApp:
             logger.error(f"Error showing window: {e}")
 
     def on_window_close(self):
-        """Minimizes window silently to background system tray when 'X' is clicked."""
         self.hide_window()
 
     def _show_activation_screen(self):
@@ -1293,7 +2117,6 @@ class VisualPdfSignerApp:
         self.btn_activate.pack(pady=20, ipady=4)
 
     def _open_url_in_app_mode(self, url, hide_window=False):
-        """Cross-platform helper to launch browser cleanly."""
         if CURRENT_OS == 'Windows':
             browser_paths = [
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -1308,20 +2131,6 @@ class VisualPdfSignerApp:
                         args.append("--window-position=-2000,-2000")
                     subprocess.Popen(args)
                     return
-        elif CURRENT_OS == 'Darwin':
-            chrome_mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            if os.path.exists(chrome_mac):
-                args = [chrome_mac, f"--app={url}"]
-                subprocess.Popen(args)
-                return
-        elif CURRENT_OS == 'Linux':
-            for b in ["google-chrome", "chromium-browser", "chromium"]:
-                try:
-                    subprocess.Popen([b, f"--app={url}"])
-                    return
-                except FileNotFoundError:
-                    continue
-
         webbrowser.open(url)
 
     def _verify(self):
@@ -1383,7 +2192,6 @@ class VisualPdfSignerApp:
             safe_key = urllib.parse.quote(key)
             url = f"{LicenseManager.WEBSITE_URL}?action=browser_sync&key={safe_key}"
             self._open_url_in_app_mode(url, hide_window=True)
-            self.root.after(0, lambda: self.lbl_status.config(text="Verifying license online...", foreground="blue"))
             self._monitor_sync_status()
         except Exception as e:
             logger.warning(f"Startup Sync fallback: {e}")
@@ -1397,8 +2205,6 @@ class VisualPdfSignerApp:
     def _check_lock_again(self):
         if LicenseManager.check_expiration_local() == "expired":
             self._force_lock_ui()
-        else:
-            self.lbl_status.config(text=f"Ready [{CURRENT_OS}]", foreground="green")
 
     def _force_lock_ui(self):
         messagebox.showwarning("License Expired", "Your software license was checked online and has been suspended or expired!\n\nPlease contact 7016797720 to renew.")
@@ -1418,869 +2224,1604 @@ class VisualPdfSignerApp:
         else: self._run_startup_sync()
 
     def _build_ui(self):
-        # Left Control Panel (Illuminated 3D Pearl Slate)
-        left_panel = tk.Frame(self.root, width=400, bg="#F0F4F8", relief=tk.GROOVE, bd=1)
-        left_panel.pack(side=tk.LEFT, fill=tk.Y)
-        left_panel.pack_propagate(False)
+        # ------------------------------------------
+        # Top Header Bar
+        # ------------------------------------------
+        header_bar = tk.Frame(self.root, bg="#1E3A8A", height=54, padx=12, pady=6)
+        header_bar.pack(side=tk.TOP, fill=tk.X)
+        header_bar.pack_propagate(False)
 
-        # Bottom Frame (Sign Buttons & Status)
-        bottom_frame = tk.Frame(left_panel, bg="#F0F4F8", padx=12, pady=10)
-        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        # Brand / Logo icon & Title
+        title_box = tk.Frame(header_bar, bg="#1E3A8A")
+        title_box.pack(side=tk.LEFT, fill=tk.Y)
 
-        self.lbl_status = tk.Label(
-            bottom_frame, text=f"Ready [{CURRENT_OS}]", foreground="#047857", bg="#F0F4F8",
-            wraplength=360, font=get_sys_font(9, "bold")
-        )
-        self.lbl_status.pack(pady=(0, 5))
+        tk.Label(title_box, text="⚡", font=get_sys_font(15, "bold"), fg="#38BDF8", bg="#1E3A8A").pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(title_box, text="A B INFOTECH", font=get_sys_font(13, "bold"), fg="#FFFFFF", bg="#1E3A8A").pack(side=tk.LEFT)
+        tk.Label(title_box, text="— PDF Sign & All-in-One Power Suite", font=get_sys_font(10), fg="#BFDBFE", bg="#1E3A8A").pack(side=tk.LEFT, padx=(6, 8))
 
-        # Sign Button with 3D Specular Highlight & Soft Ambient Shadow
-        sign_shadow = tk.Frame(bottom_frame, bg="#CBD5E1", bd=0)
-        sign_shadow.pack(fill=tk.X, pady=(0, 5))
-        sign_light_rim = tk.Frame(sign_shadow, bg="#34D399", bd=0)
-        sign_light_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        self.btn_sign = ttk.Button(
-            sign_light_rim, text="✍️ SIGN & SAVE LOCAL DOCUMENT",
-            command=self.start_signing, style="Primary3D.TButton"
-        )
-        self.btn_sign.pack(fill=tk.X, padx=(0, 1), pady=(0, 1), ipady=5)
+        lic_badge = tk.Label(title_box, text="v2.0 PRO SUITE", font=get_sys_font(8, "bold"), fg="#10B981", bg="#064E3B", padx=6, pady=2, relief=tk.SOLID, bd=1)
+        lic_badge.pack(side=tk.LEFT)
 
-        # Batch Button with 3D Specular Highlight & Soft Ambient Shadow
-        batch_shadow = tk.Frame(bottom_frame, bg="#CBD5E1", bd=0)
-        batch_shadow.pack(fill=tk.X, pady=(0, 5))
-        batch_light_rim = tk.Frame(batch_shadow, bg="#93C5FD", bd=0)
-        batch_light_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        self.btn_batch = ttk.Button(
-            batch_light_rim, text="📁 BATCH SIGN FOLDER (ALL PDFs)",
-            command=self.open_batch_dialog, style="Batch.TButton"
-        )
-        self.btn_batch.pack(fill=tk.X, padx=(0, 1), pady=(0, 1), ipady=3)
+        # Right Header Buttons
+        btn_box = tk.Frame(header_bar, bg="#1E3A8A")
+        btn_box.pack(side=tk.RIGHT, fill=tk.Y)
 
-        disclaimer_text = "Note: Adobe validation status depends on your certificate chain and system trusted roots."
-        self.lbl_disclaimer = tk.Label(
-            bottom_frame, text=disclaimer_text, foreground="#EF4444", bg="#F0F4F8",
-            wraplength=360, font=get_sys_font(7, "italic"), justify="left"
-        )
-        self.lbl_disclaimer.pack(pady=(4, 0))
+        ttk.Button(btn_box, text="🛒 Buy DSC / License", style="BuyDSC.TButton", command=self.open_buy_dsc).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_box, text="💬 WhatsApp Support", style="Tool3D.TButton", command=self.open_whatsapp).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_box, text="⚙️ Drivers & Settings", style="Tool3D.TButton", command=self.open_settings_dialog).pack(side=tk.LEFT, padx=4)
 
-        # Top Frame (Cards)
-        top_frame = tk.Frame(left_panel, bg="#F0F4F8")
-        top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(8, 0))
+        # ------------------------------------------
+        # Main Notebook (8 Tabs matching Reference Application)
+        # ------------------------------------------
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=(4, 6))
 
-        # Brand Header Card with illuminated 3D metallic sapphire rim
-        brand_shadow = tk.Frame(top_frame, bg="#CBD5E1", bd=0)
-        brand_shadow.pack(fill=tk.X, pady=(0, 8))
-        # Top-specular directional lighting rim (Electric Sky / Cyan highlight)
-        brand_light_rim = tk.Frame(brand_shadow, bg="#38BDF8", bd=0)
-        brand_light_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        # Deep Rich Sapphire Blue Card Face
-        brand_card = tk.Frame(brand_light_rim, bg="#1E3A8A", relief=tk.RAISED, bd=2, padx=10, pady=8)
-        brand_card.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
+        # 1. Sign PDF Tab
+        self.tab_sign = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_sign, text=" ✍️ Sign PDF ")
+        self._build_tab_sign(self.tab_sign)
 
-        # 3D Raised White Logo Podium / Badge (ensures 100% contrast & sharpness for black & red details)
-        logo_badge_shadow = tk.Frame(brand_card, bg="#0F172A", bd=0)
-        logo_badge_shadow.pack(side=tk.LEFT, padx=(0, 10))
-        logo_badge_rim = tk.Frame(logo_badge_shadow, bg="#93C5FD", bd=0)
-        logo_badge_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
-        logo_badge = tk.Frame(logo_badge_rim, bg="#FFFFFF", relief=tk.RAISED, bd=2, padx=4, pady=3)
-        logo_badge.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
+        # 2. Image Stamp Tab
+        self.tab_stamp = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_stamp, text=" 🖼️ Image stamp ")
+        self._build_tab_stamp(self.tab_stamp)
 
-        try:
-            # Check high-res master logo first, then fallbacks
-            logo_candidates = [
-                "image_546aa0.png",
-                LicenseManager.LICENSE_FILE,
-                "app_icon.png",
-                "app_icon.ico",
-                "icon.ico"
-            ]
-            target_logo = None
-            for cand in logo_candidates:
-                if cand and os.path.exists(cand):
-                    target_logo = cand
-                    break
+        # 3. Compress Tab
+        self.tab_compress = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_compress, text=" 🗜️ Compress ")
+        self._build_tab_compress(self.tab_compress)
 
-            if target_logo:
-                logo_pil = Image.open(target_logo)
-            else:
-                logo_pil = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        # 4. Merge Tab
+        self.tab_merge = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_merge, text=" 📑 Merge ")
+        self._build_tab_merge(self.tab_merge)
 
-            # Composite with pure white background for flawless anti-aliasing without dark fringes
-            if logo_pil.mode in ('RGBA', 'LA') or (logo_pil.mode == 'P' and 'transparency' in logo_pil.info):
-                if logo_pil.mode != 'RGBA':
-                    logo_pil = logo_pil.convert('RGBA')
-                white_bg = Image.new('RGB', logo_pil.size, (255, 255, 255))
-                white_bg.paste(logo_pil, mask=logo_pil.split()[3])
-                logo_pil = white_bg
-            else:
-                logo_pil = logo_pil.convert('RGB')
+        # 5. Verify Tab
+        self.tab_verify = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_verify, text=" 🔍 Verify ")
+        self._build_tab_verify(self.tab_verify)
 
-            # Render big and proper (86x78)
-            logo_pil.thumbnail((86, 86), Image.Resampling.LANCZOS)
-            self.tk_logo = ImageTk.PhotoImage(logo_pil)
-            tk.Label(logo_badge, image=self.tk_logo, bg="#FFFFFF").pack()
-        except Exception as e:
-            logger.warning(f"Error loading header logo: {e}")
-            tk.Label(logo_badge, text="[ABI]", fg="#1E3A8A", bg="#FFFFFF", font=get_sys_font(12, "bold")).pack(padx=8, pady=8)
+        # 6. Tools Tab
+        self.tab_tools = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_tools, text=" 🛠️ Tools ")
+        self._build_tab_tools(self.tab_tools)
 
-        brand_text_box = tk.Frame(brand_card, bg="#1E3A8A")
-        brand_text_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # 7. OCR & Edit Tab
+        self.tab_ocr_edit = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
+        self._build_tab_ocr_edit(self.tab_ocr_edit)
 
-        tk.Label(
-            brand_text_box, text="A B INFOTECH",
-            font=get_sys_font(16, "bold"), fg="#FFFFFF", bg="#1E3A8A"
-        ).pack(anchor=tk.W)
+        # 8. About & License Tab
+        self.tab_about = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_about, text=" ℹ️ About & License ")
+        self._build_tab_about(self.tab_about)
 
-        sub_badge = tk.Frame(brand_text_box, bg="#1E40AF", relief=tk.SOLID, bd=1, padx=6, pady=2)
-        sub_badge.pack(anchor=tk.W, pady=(2, 3))
-        tk.Label(
-            sub_badge, text=f"OFFLINE DIGITAL SIGNER v1.1 [{CURRENT_OS}]",
-            font=get_sys_font(7, "bold"), fg="#BFDBFE", bg="#1E40AF"
-        ).pack(anchor=tk.W)
+    # =========================================================================
+    # TAB 1: ✍️ SIGN PDF (Flagship Dual-Column Layout matching Reference App)
+    # =========================================================================
+    def _build_tab_sign(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
-        tag_badge = tk.Frame(brand_text_box, bg="#064E3B", relief=tk.SOLID, bd=1, padx=6, pady=2)
-        tag_badge.pack(anchor=tk.W)
-        tk.Label(
-            tag_badge, text="🛡️ Token & .P12/.PFX Certificate Engine",
-            font=get_sys_font(7, "bold"), fg="#6EE7B7", bg="#064E3B"
-        ).pack(anchor=tk.W)
+        left_col = tk.Frame(outer, bg="#F1F5F9", width=540)
+        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
 
-        # Mode Selector Card
-        card_mode = self._create_3d_card(top_frame, shadow_color="#CBD5E1", pady=(0, 5))
-        tk.Label(card_mode, text="Certificate Source Mode:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
-        mode_row = tk.Frame(card_mode, bg="#FFFFFF")
-        mode_row.pack(fill=tk.X, pady=(2, 2))
+        right_col = tk.Frame(outer, bg="#F1F5F9", width=560)
+        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(6, 0))
 
-        rb_tok = tk.Radiobutton(
-            mode_row, text="🔒 USB Token", variable=self.cert_source_var,
-            value="token", command=self._on_cert_source_changed,
-            bg="#FFFFFF", fg="#1E3A8A", font=get_sys_font(9, "bold"), selectcolor="#DBEAFE", bd=0
-        )
-        rb_tok.pack(side=tk.LEFT, padx=(0, 10))
+        # LEFT COLUMN: Section 1 (PDF documents)
+        card_sec1 = self._create_3d_card(left_col, pady=(0, 6))
+        tk.Label(card_sec1, text="1. PDF documents", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
 
-        rb_pfx = tk.Radiobutton(
-            mode_row, text="📁 .P12 / .PFX File", variable=self.cert_source_var,
-            value="pfx", command=self._on_cert_source_changed,
-            bg="#FFFFFF", fg="#1E3A8A", font=get_sys_font(9, "bold"), selectcolor="#DBEAFE", bd=0
-        )
-        rb_pfx.pack(side=tk.LEFT)
+        list_frame = tk.Frame(card_sec1, bg="#FFFFFF")
+        list_frame.pack(fill=tk.X, pady=(0, 4))
 
-        # Token Cards Container
-        self.token_panel = tk.Frame(top_frame, bg="#F0F4F8")
-        self.token_panel.pack(fill=tk.X)
+        self.sign_listbox = tk.Listbox(list_frame, height=5, font=get_sys_font(8), selectmode=tk.EXTENDED, bd=1, relief=tk.SOLID)
+        self.sign_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb1 = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.sign_listbox.yview)
+        sb1.pack(side=tk.RIGHT, fill=tk.Y)
+        self.sign_listbox.config(yscrollcommand=sb1.set)
 
-        card1 = self._create_3d_card(self.token_panel, shadow_color="#CBD5E1", pady=(0, 5))
-        tk.Label(card1, text="1. Select Token Driver:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
-        driver_row = tk.Frame(card1, bg="#FFFFFF")
-        driver_row.pack(fill=tk.X, pady=(2, 2))
-        self.driver_var = tk.StringVar()
-        self.driver_combo = ttk.Combobox(driver_row, textvariable=self.driver_var, values=list(DRIVER_MAP.keys()), state="readonly", font=get_sys_font(8))
-        self.driver_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        self.driver_combo.bind("<<ComboboxSelected>>", self._on_driver_selected)
-        if DRIVER_MAP: self.driver_combo.current(0)
-        ttk.Button(driver_row, text="Load Token", style="Tool3D.TButton", command=self.load_certificates).pack(side=tk.RIGHT)
+        btn_row1 = tk.Frame(card_sec1, bg="#FFFFFF")
+        btn_row1.pack(fill=tk.X, pady=(2, 4))
+        ttk.Button(btn_row1, text="Add files...", style="Tool3D.TButton", command=self.sign_add_files).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_row1, text="Add folder...", style="Tool3D.TButton", command=self.sign_add_folder).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row1, text="Remove selected", style="Tool3D.TButton", command=self.sign_remove_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row1, text="Clear", style="Tool3D.TButton", command=self.sign_clear).pack(side=tk.LEFT, padx=4)
 
-        # Quick Add Custom Driver / Settings link
-        help_row = tk.Frame(card1, bg="#FFFFFF")
-        help_row.pack(fill=tk.X, pady=(2, 0))
-        ttk.Button(
-            help_row, text="⚙️ Token not listed? Manage Drivers & License...",
-            style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")
-        ).pack(side=tk.LEFT)
+        dest_frame = tk.Frame(card_sec1, bg="#FFFFFF")
+        dest_frame.pack(fill=tk.X, pady=(4, 2))
+        tk.Radiobutton(dest_frame, text="Save beside the original (name_signed.pdf)", variable=self.sign_output_mode, value="beside", bg="#FFFFFF", fg="#1E3A8A", font=get_sys_font(8)).pack(anchor=tk.W)
 
-        card2 = self._create_3d_card(self.token_panel, shadow_color="#CBD5E1", pady=(0, 5))
-        tk.Label(card2, text="2. Select Token Certificate:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
-        self.cert_combo = ttk.Combobox(card2, state="readonly", font=get_sys_font(8))
-        self.cert_combo.pack(fill=tk.X, pady=(2, 2))
+        dest_row2 = tk.Frame(dest_frame, bg="#FFFFFF")
+        dest_row2.pack(fill=tk.X, pady=(2, 2))
+        tk.Radiobutton(dest_row2, text="Save in folder:", variable=self.sign_output_mode, value="folder", bg="#FFFFFF", fg="#1E3A8A", font=get_sys_font(8)).pack(side=tk.LEFT)
+        self.entry_sign_out_folder = ttk.Entry(dest_row2, textvariable=self.sign_output_folder, font=get_sys_font(8))
+        self.entry_sign_out_folder.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        ttk.Button(dest_row2, text="Browse...", style="Tool3D.TButton", command=self.sign_browse_out_folder).pack(side=tk.RIGHT)
 
-        card3 = self._create_3d_card(self.token_panel, shadow_color="#CBD5E1", pady=(0, 5))
-        tk.Label(card3, text="3. Hardware Token PIN:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
-        self.pin_var = tk.StringVar()
-        ttk.Entry(card3, textvariable=self.pin_var, show="*").pack(fill=tk.X, pady=(2, 2))
+        tk.Label(card_sec1, text="Your original files are never changed.", font=get_sys_font(7, "italic"), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W)
+        tk.Checkbutton(card_sec1, text="If a PDF is already signed: flatten the old signatures first", variable=self.sign_flatten_old, bg="#FFFFFF", fg="#334155", font=get_sys_font(8)).pack(anchor=tk.W, pady=(2, 0))
 
-        # PFX Cards Container
-        self.pfx_panel = tk.Frame(top_frame, bg="#F0F4F8")
+        # LEFT COLUMN: Section 2 (Digital certificate (DSC))
+        card_sec2 = self._create_3d_card(left_col, pady=(0, 6))
+        tk.Label(card_sec2, text="2. Digital certificate (DSC)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
 
-        card_p1 = self._create_3d_card(self.pfx_panel, shadow_color="#CBD5E1", pady=(0, 5))
-        tk.Label(card_p1, text="1. Select .P12 / .PFX File:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
-        pfx_file_row = tk.Frame(card_p1, bg="#FFFFFF")
-        pfx_file_row.pack(fill=tk.X, pady=(2, 2))
-        self.pfx_path_entry = ttk.Entry(pfx_file_row, textvariable=self.pfx_path_var, font=get_sys_font(8))
-        self.pfx_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(pfx_file_row, text="Browse...", style="Tool3D.TButton", command=self.browse_pfx_file).pack(side=tk.RIGHT)
+        self.nb_dsc = ttk.Notebook(card_sec2)
+        self.nb_dsc.pack(fill=tk.X, expand=True, pady=(2, 4))
 
-        card_p2 = self._create_3d_card(self.pfx_panel, shadow_color="#CBD5E1", pady=(0, 5))
-        tk.Label(card_p2, text="2. Certificate Password:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
-        pfx_pass_row = tk.Frame(card_p2, bg="#FFFFFF")
-        pfx_pass_row.pack(fill=tk.X, pady=(2, 2))
-        self.pfx_pass_entry = ttk.Entry(pfx_pass_row, textvariable=self.pfx_pass_var, show="*")
-        self.pfx_pass_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(pfx_pass_row, text="Verify", style="Tool3D.TButton", command=lambda: self.verify_pfx_certificate(silent=False)).pack(side=tk.RIGHT)
+        # Sub-tab A: USB Token / Smart card
+        f_token = ttk.Frame(self.nb_dsc, padding=6)
+        self.nb_dsc.add(f_token, text=" USB Token / Smart card ")
 
-        card_p3 = self._create_3d_card(self.pfx_panel, shadow_color="#CBD5E1", pady=(0, 5))
-        tk.Label(card_p3, text="3. Certificate Status:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
-        self.lbl_pfx_details = tk.Label(
-            card_p3, text="Select .p12/.pfx file & enter password to unlock.",
-            font=get_sys_font(8), fg="#64748B", bg="#F8FAFC",
-            relief=tk.SUNKEN, bd=1, padx=6, pady=3, justify="left", anchor=tk.W
-        )
-        self.lbl_pfx_details.pack(fill=tk.X, pady=(2, 2))
+        tk.Label(f_token, text="Token PKCS#11 Driver:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
+        d_row = tk.Frame(f_token)
+        d_row.pack(fill=tk.X, pady=(2, 4))
+        self.token_driver_combo = ttk.Combobox(d_row, textvariable=self.driver_var, values=list(DRIVER_MAP.keys()), state="readonly", font=get_sys_font(8))
+        self.token_driver_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        if DRIVER_MAP: self.token_driver_combo.current(0)
+        ttk.Button(d_row, text="Refresh", style="Tool3D.TButton", command=self.load_token_certificates).pack(side=tk.RIGHT)
 
-        # Card 4: Signature Area & Checkbox (Prominent in Side Panel)
-        card4 = self._create_3d_card(top_frame, shadow_color="#CBD5E1", pady=(0, 5))
-        self.card4_shadow = card4.shadow
+        tk.Label(f_token, text="Certificate in Token:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
+        self.token_cert_combo = ttk.Combobox(f_token, state="readonly", font=get_sys_font(8))
+        self.token_cert_combo.pack(fill=tk.X, pady=(2, 4))
 
-        card4_header = tk.Frame(card4, bg="#FFFFFF")
-        card4_header.pack(fill=tk.X)
-        tk.Label(card4_header, text="4. Selected Signature Area:", font=get_sys_font(9, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(side=tk.LEFT)
+        pin_row = tk.Frame(f_token)
+        pin_row.pack(fill=tk.X, pady=(2, 2))
+        tk.Label(pin_row, text="Hardware Token PIN:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(side=tk.LEFT)
+        ttk.Entry(pin_row, textvariable=self.pin_var, show="*", width=16).pack(side=tk.LEFT, padx=6)
+        ttk.Button(pin_row, text="⚙️ Manage Drivers", style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")).pack(side=tk.RIGHT)
 
-        # Prominent Checkbox in Side Panel
-        self.chk_all_pages = tk.Checkbutton(
-            card4, text="☑️ Apply area to ALL pages (Sign all pages)",
-            variable=self.all_pages_var, command=self.on_all_pages_toggle,
-            bg="#FFFFFF", fg="#047857", activebackground="#FFFFFF", activeforeground="#065F46",
-            selectcolor="#D1FAE5", font=get_sys_font(8, "bold"), cursor="hand2", bd=0
-        )
-        self.chk_all_pages.pack(anchor=tk.W, pady=(2, 3))
+        # Sub-tab B: PFX / P12 file
+        f_pfx = ttk.Frame(self.nb_dsc, padding=6)
+        self.nb_dsc.add(f_pfx, text=" PFX / P12 file ")
 
-        self.area_container = tk.Frame(card4, bg="#F8FAFC", relief=tk.SUNKEN, bd=1, height=44)
-        self.area_container.pack(fill=tk.X, pady=(1, 2))
-        self.area_container.pack_propagate(False)
+        tk.Label(f_pfx, text="Select .PFX / .P12 File:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
+        p_row1 = tk.Frame(f_pfx)
+        p_row1.pack(fill=tk.X, pady=(2, 4))
+        ttk.Entry(p_row1, textvariable=self.pfx_path_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(p_row1, text="Browse...", style="Tool3D.TButton", command=self.browse_pfx_file).pack(side=tk.RIGHT)
 
-        self.lbl_no_areas = tk.Label(
-            self.area_container, text="No area selected yet.\nClick '✏️ Draw Signature Box' or open a PDF.",
-            bg="#F8FAFC", fg="#64748B", font=get_sys_font(8), justify="center"
-        )
-        self.lbl_no_areas.pack(expand=True)
+        p_row2 = tk.Frame(f_pfx)
+        p_row2.pack(fill=tk.X, pady=(2, 4))
+        tk.Label(p_row2, text="Password:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(side=tk.LEFT)
+        ttk.Entry(p_row2, textvariable=self.pfx_pass_var, show="*", width=16).pack(side=tk.LEFT, padx=6)
+        ttk.Button(p_row2, text="Verify", style="Tool3D.TButton", command=lambda: self.verify_pfx_certificate(silent=False)).pack(side=tk.LEFT)
 
-        # Set initial visibility based on default mode
-        self._on_cert_source_changed()
+        self.lbl_pfx_info = tk.Label(f_pfx, text="Choose .pfx file & enter password.", font=get_sys_font(8), fg="#64748B", bg="#F8FAFC", relief=tk.SUNKEN, bd=1, padx=4, pady=2, anchor=tk.W)
+        self.lbl_pfx_info.pack(fill=tk.X, pady=(2, 0))
 
-        # Right Panel (PDF Viewport with 3D recessed frame)
-        right_panel = tk.Frame(self.root, bg="#CBD5E1")
-        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Sub-tab C: Windows certificate store
+        f_win = ttk.Frame(self.nb_dsc, padding=6)
+        self.nb_dsc.add(f_win, text=" Windows certificate store ")
 
-        toolbar_shadow = tk.Frame(right_panel, bg="#CBD5E1", bd=0)
-        toolbar_shadow.pack(fill=tk.X)
-        toolbar = ttk.Frame(toolbar_shadow, padding="6", style="Toolbar.TFrame")
-        toolbar.pack(fill=tk.BOTH, expand=True, padx=(0, 0), pady=(0, 1))
+        w_row1 = tk.Frame(f_win)
+        w_row1.pack(fill=tk.X, pady=(2, 4))
+        tk.Label(w_row1, text="Store:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(side=tk.LEFT)
+        self.combo_win_store = ttk.Combobox(w_row1, textvariable=self.win_store_var, values=["MY (Current User)", "ROOT (Local Machine)"], state="readonly", width=18, font=get_sys_font(8))
+        self.combo_win_store.pack(side=tk.LEFT, padx=6)
+        self.combo_win_store.current(0)
+        ttk.Button(w_row1, text="Refresh", style="Tool3D.TButton", command=self.load_win_store_certificates).pack(side=tk.RIGHT)
 
-        ttk.Button(toolbar, text="📂 Open PDF", style="Tool3D.TButton", command=self.open_pdf).pack(side=tk.LEFT, padx=3)
-        self.btn_clear_pdf = ttk.Button(toolbar, text="🗑️ Clear PDF", style="Tool3D.TButton", command=self.clear_pdf, state=tk.DISABLED)
-        self.btn_clear_pdf.pack(side=tk.LEFT, padx=3)
+        tk.Label(f_win, text="Certificate:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
+        self.win_cert_combo = ttk.Combobox(f_win, state="readonly", font=get_sys_font(8))
+        self.win_cert_combo.pack(fill=tk.X, pady=(2, 4))
 
-        self.btn_prev = ttk.Button(toolbar, text="◀ Prev", style="Tool3D.TButton", command=self.prev_page, state=tk.DISABLED)
-        self.btn_prev.pack(side=tk.LEFT, padx=3)
-        self.lbl_page = tk.Label(toolbar, text="Page 0 / 0", font=get_sys_font(9, "bold"), bg="#F8FAFC", fg="#1E3A8A", relief=tk.SUNKEN, bd=1, padx=8, pady=3)
-        self.lbl_page.pack(side=tk.LEFT, padx=6)
-        self.btn_next = ttk.Button(toolbar, text="Next ▶", style="Tool3D.TButton", command=self.next_page, state=tk.DISABLED)
-        self.btn_next.pack(side=tk.LEFT, padx=3)
+        win_note = ("Certificates installed in Windows. If signing fails with 'Keyset does not exist', "
+                    "use the USB Token tab. Windows asks for the PIN when you sign. "
+                    "If your certificate is missing, also try Store: Local Machine.")
+        tk.Label(f_win, text=win_note, font=get_sys_font(7, "italic"), fg="#64748B", wraplength=480, justify="left").pack(anchor=tk.W, pady=(2, 0))
 
-        self.btn_batch_tool = ttk.Button(toolbar, text="📁 Batch Sign Folder", style="Batch.TButton", command=self.open_batch_dialog)
-        self.btn_batch_tool.pack(side=tk.LEFT, padx=6)
+        # Brand Footer Box (A B INFOTECH)
+        brand_bar = tk.Frame(card_sec2, bg="#F0F9FF", relief=tk.SOLID, bd=1, padx=8, pady=6)
+        brand_bar.pack(fill=tk.X, pady=(6, 0))
+        tk.Label(brand_bar, text="A B INFOTECH", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W)
+        tk.Label(brand_bar, text="Reliable, Secure & Perfect  |  WhatsApp: 9752318084  |  a-b-infotech.in", font=get_sys_font(7), fg="#0284C7", bg="#F0F9FF").pack(anchor=tk.W)
 
-        self.btn_settings = ttk.Button(toolbar, text="⚙️ Settings & License", style="Tool3D.TButton", command=self.open_settings_dialog)
-        self.btn_settings.pack(side=tk.LEFT, padx=4)
+        # RIGHT COLUMN: Section 3 (Signature details)
+        card_sec3 = self._create_3d_card(right_col, pady=(0, 6))
+        tk.Label(card_sec3, text="3. Signature details", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
 
-        ttk.Button(toolbar, text="🧹 Clear Boxes", style="Tool3D.TButton", command=self.clear_boxes).pack(side=tk.RIGHT, padx=3)
-        self.btn_draw = ttk.Button(toolbar, text="✏️ Draw Signature Box", style="Draw3D.TButton", command=self.toggle_draw_mode, state=tk.DISABLED)
-        self.btn_draw.pack(side=tk.RIGHT, padx=3)
+        grid3 = tk.Frame(card_sec3, bg="#FFFFFF")
+        grid3.pack(fill=tk.X)
 
-        # Bulk Mode Banner (initially hidden, packed above canvas_frame when in bulk mode)
-        self.bulk_banner_frame = tk.Frame(right_panel, bg="#DBEAFE", relief=tk.SOLID, bd=1, padx=10, pady=6)
-        self.bulk_banner_lbl = tk.Label(
-            self.bulk_banner_frame, text="", bg="#DBEAFE", fg="#1E40AF",
-            font=get_sys_font(9, "bold"), anchor="w"
-        )
-        self.bulk_banner_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(
-            self.bulk_banner_frame, text="❌ Exit Bulk Mode", style="Tool3D.TButton",
-            command=lambda: self.exit_bulk_mode(confirm=True)
-        ).pack(side=tk.RIGHT, padx=4)
+        tk.Label(grid3, text="Reason:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=2)
+        reasons_list = ["I approve this document", "I am the author of this document", "I have reviewed and verified this document", "Official Authentication"]
+        self.combo_reason = ttk.Combobox(grid3, textvariable=self.sign_reason_var, values=reasons_list, font=get_sys_font(8))
+        self.combo_reason.grid(row=0, column=1, sticky="ew", padx=(4, 12), pady=2)
 
-        # 3D Recessed Drafting Table Viewport
-        viewport_outer = tk.Frame(right_panel, bg="#94A3B8", bd=0)
-        viewport_outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        tk.Label(grid3, text="Location:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=0, column=2, sticky="w", pady=2)
+        ttk.Entry(grid3, textvariable=self.sign_location_var, font=get_sys_font(8), width=16).grid(row=0, column=3, sticky="ew", pady=2)
 
-        self.canvas_frame = tk.Frame(viewport_outer, bg="#CBD5E1", relief=tk.SUNKEN, bd=2)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=(1, 1), pady=(1, 1))
+        tk.Label(grid3, text="Contact info:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(grid3, textvariable=self.sign_contact_var, font=get_sys_font(8)).grid(row=1, column=1, sticky="ew", padx=(4, 12), pady=2)
 
-        self.canvas_vscroll = ttk.Scrollbar(self.canvas_frame, orient=tk.VERTICAL)
-        self.canvas_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas_hscroll = ttk.Scrollbar(self.canvas_frame, orient=tk.HORIZONTAL)
-        self.canvas_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Label(grid3, text="Hash algorithm:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=1, column=2, sticky="w", pady=2)
+        ttk.Combobox(grid3, textvariable=self.sign_hash_var, values=["SHA-256", "SHA-384", "SHA-512"], state="readonly", width=14, font=get_sys_font(8)).grid(row=1, column=3, sticky="ew", pady=2)
 
-        self.canvas = tk.Canvas(self.canvas_frame, bg="#94A3B8", xscrollcommand=self.canvas_hscroll.set, yscrollcommand=self.canvas_vscroll.set, highlightthickness=0)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.canvas_vscroll.config(command=self.canvas.yview)
-        self.canvas_hscroll.config(command=self.canvas.xview)
+        tk.Label(grid3, text="Time-stamp server:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=2, column=0, sticky="w", pady=2)
+        tsa_list = ["DigiCert TSA (Recommended)", "FreeTSA.org", "None (Local clock)"]
+        ttk.Combobox(grid3, textvariable=self.sign_tsa_var, values=tsa_list, state="readonly", font=get_sys_font(8)).grid(row=2, column=1, sticky="ew", padx=(4, 12), pady=2)
 
-        self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
-        self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
+        tk.Label(grid3, text="Signature type:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=2, column=2, sticky="w", pady=2)
+        ttk.Combobox(grid3, textvariable=self.sign_type_var, values=["Approval signature (normal)", "Certification signature"], state="readonly", width=14, font=get_sys_font(8)).grid(row=2, column=3, sticky="ew", pady=2)
+        grid3.columnconfigure(1, weight=1)
 
-    def _on_cert_source_changed(self):
-        mode = self.cert_source_var.get()
-        if mode == "token":
-            self.pfx_panel.pack_forget()
-            self.token_panel.pack(fill=tk.X, before=self.card4_shadow)
-            self.lbl_status.config(text=f"Switched to Hardware Token Mode [{CURRENT_OS}].", foreground="#1E3A8A")
+        # RIGHT COLUMN: Section 4 (Appearance)
+        card_sec4 = self._create_3d_card(right_col, pady=(0, 6))
+        tk.Label(card_sec4, text="4. Appearance", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 2))
+
+        tk.Checkbutton(card_sec4, text="Show the signature on the page (visible signature)", variable=self.chk_visible_sig, font=get_sys_font(8, "bold"), fg="#047857", bg="#FFFFFF").pack(anchor=tk.W)
+
+        scope_row = tk.Frame(card_sec4, bg="#FFFFFF")
+        scope_row.pack(fill=tk.X, pady=(2, 2))
+        tk.Radiobutton(scope_row, text="All pages", variable=self.sign_page_mode, value="all", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Radiobutton(scope_row, text="Each page separately", variable=self.sign_page_mode, value="each", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=6)
+        tk.Radiobutton(scope_row, text="First page", variable=self.sign_page_mode, value="first", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=6)
+        tk.Radiobutton(scope_row, text="Last page", variable=self.sign_page_mode, value="last", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=6)
+        tk.Radiobutton(scope_row, text="Page no.", variable=self.sign_page_mode, value="specific", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Entry(scope_row, textvariable=self.sign_page_num_var, width=4, font=get_sys_font(8)).pack(side=tk.LEFT)
+
+        pos_bar = tk.Frame(card_sec4, bg="#FFFFFF")
+        pos_bar.pack(fill=tk.X, pady=(4, 4))
+        btn_pos = ttk.Button(pos_bar, text="📐 Choose position and size on the page...", style="Batch.TButton", command=self.open_sign_position_picker)
+        btn_pos.pack(fill=tk.X, ipady=3)
+
+        self.lbl_sign_pos_info = tk.Label(card_sec4, text="📍 Position: Bottom-Right corner (X: 400 pt, Y: 36 pt, W: 160 pt, H: 65 pt)", font=get_sys_font(8), fg="#047857", bg="#ECFDF5", relief=tk.SOLID, bd=1, padx=4, pady=2)
+        self.lbl_sign_pos_info.pack(fill=tk.X, pady=(1, 4))
+
+        chk_row = tk.Frame(card_sec4, bg="#FFFFFF")
+        chk_row.pack(fill=tk.X, pady=(2, 4))
+        tk.Checkbutton(chk_row, text="Name", variable=self.chk_name_var, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Checkbutton(chk_row, text="Date", variable=self.chk_date_var, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(chk_row, text="Reason", variable=self.chk_reason_var, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(chk_row, text="Location", variable=self.chk_loc_var, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(chk_row, text="Issuer", variable=self.chk_issuer_var, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(chk_row, text="Green tick ✓", variable=self.chk_tick_var, bg="#FFFFFF", font=get_sys_font(8, "bold"), fg="#059669").pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(chk_row, text="Border", variable=self.chk_border_var, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+
+        app_grid = tk.Frame(card_sec4, bg="#FFFFFF")
+        app_grid.pack(fill=tk.X, pady=(2, 2))
+        tk.Label(app_grid, text="Heading:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(app_grid, textvariable=self.sign_heading_var, font=get_sys_font(8)).grid(row=0, column=1, sticky="ew", padx=4, pady=2)
+
+        tk.Label(app_grid, text="Extra line / firm:", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(app_grid, textvariable=self.sign_extra_line_var, font=get_sys_font(8)).grid(row=1, column=1, sticky="ew", padx=4, pady=2)
+
+        tk.Label(app_grid, text="Logo image (optional):", font=get_sys_font(8, "bold"), fg="#334155", bg="#FFFFFF").grid(row=2, column=0, sticky="w", pady=2)
+        logo_f = tk.Frame(app_grid, bg="#FFFFFF")
+        logo_f.grid(row=2, column=1, sticky="ew", padx=4, pady=2)
+        ttk.Entry(logo_f, textvariable=self.sign_logo_path_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(logo_f, text="Logo...", style="Tool3D.TButton", command=self.browse_sign_logo).pack(side=tk.RIGHT)
+        app_grid.columnconfigure(1, weight=1)
+
+        # RIGHT COLUMN: Section 5 (Protect the signed PDF)
+        card_sec5 = self._create_3d_card(right_col, pady=(0, 4))
+        tk.Label(card_sec5, text="5. Protect the signed PDF (optional)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 2))
+
+        tk.Checkbutton(card_sec5, text="Protect with a password (256-bit AES)", variable=self.chk_protect_var, font=get_sys_font(8, "bold"), fg="#DC2626", bg="#FFFFFF").pack(anchor=tk.W)
+
+        pw_grid = tk.Frame(card_sec5, bg="#FFFFFF")
+        pw_grid.pack(fill=tk.X, pady=(2, 2))
+        tk.Label(pw_grid, text="Password to open (optional):", font=get_sys_font(8), bg="#FFFFFF").grid(row=0, column=0, sticky="w")
+        ttk.Entry(pw_grid, textvariable=self.protect_open_pw_var, show="*", width=18).grid(row=0, column=1, padx=4, sticky="w")
+
+        tk.Label(pw_grid, text="Permissions password:", font=get_sys_font(8), bg="#FFFFFF").grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Entry(pw_grid, textvariable=self.protect_perm_pw_var, show="*", width=18).grid(row=0, column=3, padx=4, sticky="w")
+
+        perm_row = tk.Frame(card_sec5, bg="#FFFFFF")
+        perm_row.pack(fill=tk.X, pady=(2, 0))
+        tk.Checkbutton(perm_row, text="Allow printing", variable=self.chk_allow_print, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(perm_row, text="Allow copying text", variable=self.chk_allow_copy, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=8)
+        tk.Checkbutton(perm_row, text="Allow editing", variable=self.chk_allow_edit, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=8)
+
+        # BOTTOM ACTION BAR
+        bot_bar = tk.Frame(parent, bg="#F1F5F9", padx=8, pady=4)
+        bot_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.sign_progress = ttk.Progressbar(bot_bar, mode='determinate')
+        self.sign_progress.pack(fill=tk.X, pady=(0, 4))
+
+        act_row = tk.Frame(bot_bar, bg="#F1F5F9")
+        act_row.pack(fill=tk.X)
+
+        sign_shadow = tk.Frame(act_row, bg="#CBD5E1", bd=0)
+        sign_shadow.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        sign_rim = tk.Frame(sign_shadow, bg="#34D399", bd=0)
+        sign_rim.pack(fill=tk.BOTH, expand=True, padx=(1, 2), pady=(1, 2))
+        self.btn_sign_docs = ttk.Button(sign_rim, text="✍️ SIGN DOCUMENTS", style="Primary3D.TButton", command=self.start_document_signing)
+        self.btn_sign_docs.pack(fill=tk.BOTH, expand=True, ipady=6)
+
+        self.btn_open_folder = ttk.Button(act_row, text="Open output folder", style="Tool3D.TButton", command=self.open_output_folder)
+        self.btn_open_folder.pack(side=tk.RIGHT, padx=4)
+
+        self.lbl_sign_status = tk.Label(bot_bar, text="Ready to sign documents.", font=get_sys_font(9, "bold"), fg="#047857", bg="#F1F5F9", anchor="w")
+        self.lbl_sign_status.pack(fill=tk.X, pady=(2, 0))
+
+        self.load_token_certificates()
+
+    # =========================================================================
+    # TAB 2: 🖼️ IMAGE STAMP
+    # =========================================================================
+    def _build_tab_stamp(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        card1 = self._create_3d_card(outer, pady=(0, 8))
+        tk.Label(card1, text="1. Select PDF Documents to Stamp", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        
+        lf = tk.Frame(card1, bg="#FFFFFF")
+        lf.pack(fill=tk.X, pady=(0, 4))
+        self.stamp_listbox = tk.Listbox(lf, height=4, font=get_sys_font(8), selectmode=tk.EXTENDED)
+        self.stamp_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(lf, orient=tk.VERTICAL, command=self.stamp_listbox.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.stamp_listbox.config(yscrollcommand=sb.set)
+
+        b_row = tk.Frame(card1, bg="#FFFFFF")
+        b_row.pack(fill=tk.X, pady=(2, 2))
+        ttk.Button(b_row, text="Add files...", style="Tool3D.TButton", command=self.stamp_add_files).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(b_row, text="Add folder...", style="Tool3D.TButton", command=self.stamp_add_folder).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="Remove", style="Tool3D.TButton", command=self.stamp_remove).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="Clear", style="Tool3D.TButton", command=self.stamp_clear).pack(side=tk.LEFT, padx=4)
+
+        card2 = self._create_3d_card(outer, pady=(0, 8))
+        tk.Label(card2, text="2. Stamp Image & Placement Settings", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        i_row = tk.Frame(card2, bg="#FFFFFF")
+        i_row.pack(fill=tk.X, pady=(2, 4))
+        tk.Label(i_row, text="Stamp Image (PNG/JPG):", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(side=tk.LEFT)
+        ttk.Entry(i_row, textvariable=self.stamp_img_path, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        ttk.Button(i_row, text="Browse Image...", style="Tool3D.TButton", command=self.browse_stamp_image).pack(side=tk.RIGHT)
+
+        pos_row = tk.Frame(card2, bg="#FFFFFF")
+        pos_row.pack(fill=tk.X, pady=(4, 4))
+        tk.Label(pos_row, text="Position:", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(side=tk.LEFT, padx=(0, 6))
+        for p_val, p_lbl in [("bottom_right", "Bottom-Right"), ("bottom_left", "Bottom-Left"), ("top_right", "Top-Right"), ("top_left", "Top-Left"), ("center", "Center")]:
+            tk.Radiobutton(pos_row, text=p_lbl, variable=self.stamp_pos_mode, value=p_val, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(pos_row, text="📐 Choose on Page...", style="Tool3D.TButton", command=self.open_stamp_position_picker).pack(side=tk.LEFT, padx=8)
+
+        prop_row = tk.Frame(card2, bg="#FFFFFF")
+        prop_row.pack(fill=tk.X, pady=(4, 2))
+        tk.Label(prop_row, text="Pages:", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(side=tk.LEFT, padx=(0, 4))
+        for s_val, s_lbl in [("all", "All pages"), ("first", "First page"), ("last", "Last page"), ("custom", "Page no.")]:
+            tk.Radiobutton(prop_row, text=s_lbl, variable=self.stamp_page_scope, value=s_val, bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=3)
+        ttk.Entry(prop_row, textvariable=self.stamp_page_num, width=4).pack(side=tk.LEFT, padx=2)
+
+        tk.Label(prop_row, text="Size (WxH pt):", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Entry(prop_row, textvariable=self.stamp_width_var, width=5).pack(side=tk.LEFT)
+        tk.Label(prop_row, text="x", bg="#FFFFFF").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(prop_row, textvariable=self.stamp_height_var, width=5).pack(side=tk.LEFT)
+
+        card3 = self._create_3d_card(outer, pady=(0, 8))
+        tk.Label(card3, text="3. Output Options", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Radiobutton(card3, text="Save beside original (_stamped.pdf)", variable=self.stamp_out_mode, value="beside", bg="#FFFFFF", font=get_sys_font(8)).pack(anchor=tk.W)
+        s_out_row = tk.Frame(card3, bg="#FFFFFF")
+        s_out_row.pack(fill=tk.X, pady=(2, 2))
+        tk.Radiobutton(s_out_row, text="Save in folder:", variable=self.stamp_out_mode, value="folder", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT)
+        ttk.Entry(s_out_row, textvariable=self.stamp_out_dir, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        ttk.Button(s_out_row, text="Browse...", style="Tool3D.TButton", command=self.stamp_browse_out_folder).pack(side=tk.RIGHT)
+
+        b_bot = tk.Frame(outer, bg="#F1F5F9")
+        b_bot.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(b_bot, text="🖼️ APPLY STAMP TO DOCUMENTS", style="Primary3D.TButton", command=self.start_image_stamping).pack(fill=tk.X, ipady=5)
+        self.lbl_stamp_status = tk.Label(b_bot, text="", font=get_sys_font(9, "bold"), fg="#047857", bg="#F1F5F9")
+        self.lbl_stamp_status.pack(pady=4)
+
+    # =========================================================================
+    # TAB 3: 🗜️ COMPRESS
+    # =========================================================================
+    def _build_tab_compress(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        card1 = self._create_3d_card(outer, pady=(0, 6))
+        tk.Label(card1, text="1. Select PDF Documents to Compress", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        
+        lf = tk.Frame(card1, bg="#FFFFFF")
+        lf.pack(fill=tk.X, pady=(0, 4))
+        self.compress_listbox = tk.Listbox(lf, height=4, font=get_sys_font(8), selectmode=tk.EXTENDED)
+        self.compress_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(lf, orient=tk.VERTICAL, command=self.compress_listbox.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.compress_listbox.config(yscrollcommand=sb.set)
+
+        b_row = tk.Frame(card1, bg="#FFFFFF")
+        b_row.pack(fill=tk.X, pady=(2, 2))
+        ttk.Button(b_row, text="Add files...", style="Tool3D.TButton", command=self.compress_add_files).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(b_row, text="Add folder...", style="Tool3D.TButton", command=self.compress_add_folder).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="Remove", style="Tool3D.TButton", command=self.compress_remove).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="Clear", style="Tool3D.TButton", command=self.compress_clear).pack(side=tk.LEFT, padx=4)
+
+        card2 = self._create_3d_card(outer, pady=(0, 6))
+        tk.Label(card2, text="2. Compression Profiles & Color Mode", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        p_row = tk.Frame(card2, bg="#FFFFFF")
+        p_row.pack(fill=tk.X, pady=(2, 2))
+        tk.Radiobutton(p_row, text="Medium Compression (Recommended - 120 DPI, 75% quality)", variable=self.compress_level_var, value="medium", bg="#FFFFFF", font=get_sys_font(8, "bold"), fg="#047857").pack(anchor=tk.W)
+        tk.Radiobutton(p_row, text="High Compression (Smallest file size - 72 DPI, 50% quality)", variable=self.compress_level_var, value="high", bg="#FFFFFF", font=get_sys_font(8)).pack(anchor=tk.W)
+        tk.Radiobutton(p_row, text="Low Compression (High print quality - 150 DPI, 85% quality)", variable=self.compress_level_var, value="low", bg="#FFFFFF", font=get_sys_font(8)).pack(anchor=tk.W)
+
+        c_row = tk.Frame(card2, bg="#FFFFFF")
+        c_row.pack(fill=tk.X, pady=(4, 2))
+        tk.Label(c_row, text="Color Mode:", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(side=tk.LEFT, padx=(0, 6))
+        tk.Radiobutton(c_row, text="Color", variable=self.compress_color_var, value="color", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(c_row, text="Grayscale", variable=self.compress_color_var, value="grayscale", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(c_row, text="Black & White (Monochrome)", variable=self.compress_color_var, value="bw", bg="#FFFFFF", font=get_sys_font(8)).pack(side=tk.LEFT, padx=4)
+
+        card3 = self._create_3d_card(outer, pady=(0, 6))
+        tk.Label(card3, text="3. Compression Results Table", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        
+        self.tree_compress = ttk.Treeview(card3, columns=("file", "orig", "comp", "saved", "pct"), show="headings", height=5)
+        self.tree_compress.heading("file", text="File Name")
+        self.tree_compress.heading("orig", text="Original Size")
+        self.tree_compress.heading("comp", text="Compressed Size")
+        self.tree_compress.heading("saved", text="Space Saved")
+        self.tree_compress.heading("pct", text="Reduction %")
+        self.tree_compress.column("file", width=340)
+        self.tree_compress.column("orig", width=120)
+        self.tree_compress.column("comp", width=120)
+        self.tree_compress.column("saved", width=120)
+        self.tree_compress.column("pct", width=100)
+        self.tree_compress.pack(fill=tk.X)
+
+        b_bot = tk.Frame(outer, bg="#F1F5F9")
+        b_bot.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(b_bot, text="🗜️ COMPRESS PDF DOCUMENTS", style="Primary3D.TButton", command=self.start_compressing).pack(fill=tk.X, ipady=5)
+        self.lbl_compress_status = tk.Label(b_bot, text="", font=get_sys_font(9, "bold"), fg="#047857", bg="#F1F5F9")
+        self.lbl_compress_status.pack(pady=4)
+
+    # =========================================================================
+    # TAB 4: 📑 MERGE
+    # =========================================================================
+    def _build_tab_merge(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        card1 = self._create_3d_card(outer, pady=(0, 8))
+        tk.Label(card1, text="1. PDF Documents Order & Page Ranges", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        self.tree_merge = ttk.Treeview(card1, columns=("num", "name", "range", "path"), show="headings", height=8)
+        self.tree_merge.heading("num", text="#")
+        self.tree_merge.heading("name", text="File Name")
+        self.tree_merge.heading("range", text="Pages (e.g. all, 1-3, 5)")
+        self.tree_merge.heading("path", text="Full Path")
+        self.tree_merge.column("num", width=40)
+        self.tree_merge.column("name", width=280)
+        self.tree_merge.column("range", width=180)
+        self.tree_merge.column("path", width=400)
+        self.tree_merge.pack(fill=tk.X, pady=(0, 4))
+        self.tree_merge.bind("<<TreeviewSelect>>", self._on_merge_select)
+
+        b_row = tk.Frame(card1, bg="#FFFFFF")
+        b_row.pack(fill=tk.X, pady=(2, 4))
+        ttk.Button(b_row, text="Add files...", style="Tool3D.TButton", command=self.merge_add_files).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(b_row, text="Add folder...", style="Tool3D.TButton", command=self.merge_add_folder).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="⬆ Move Up", style="Tool3D.TButton", command=self.merge_move_up).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="⬇ Move Down", style="Tool3D.TButton", command=self.merge_move_down).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="Remove", style="Tool3D.TButton", command=self.merge_remove).pack(side=tk.LEFT, padx=4)
+        ttk.Button(b_row, text="Clear", style="Tool3D.TButton", command=self.merge_clear).pack(side=tk.LEFT, padx=4)
+
+        edit_row = tk.Frame(card1, bg="#FFFFFF")
+        edit_row.pack(fill=tk.X, pady=(4, 2))
+        tk.Label(edit_row, text="Pages to include for selected PDF:", font=get_sys_font(8, "bold"), bg="#FFFFFF").pack(side=tk.LEFT)
+        self.entry_merge_range = ttk.Entry(edit_row, font=get_sys_font(8), width=18)
+        self.entry_merge_range.pack(side=tk.LEFT, padx=6)
+        ttk.Button(edit_row, text="Set Range", style="Tool3D.TButton", command=self.merge_set_range).pack(side=tk.LEFT)
+
+        card2 = self._create_3d_card(outer, pady=(0, 8))
+        tk.Label(card2, text="2. Output Merged File Destination", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        m_row = tk.Frame(card2, bg="#FFFFFF")
+        m_row.pack(fill=tk.X, pady=(2, 2))
+        ttk.Entry(m_row, textvariable=self.merge_out_path, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(m_row, text="Browse Destination...", style="Tool3D.TButton", command=self.merge_browse_out).pack(side=tk.RIGHT)
+
+        b_bot = tk.Frame(outer, bg="#F1F5F9")
+        b_bot.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(b_bot, text="📑 MERGE ALL PDFS", style="Primary3D.TButton", command=self.start_merging).pack(fill=tk.X, ipady=5)
+        self.lbl_merge_status = tk.Label(b_bot, text="", font=get_sys_font(9, "bold"), fg="#047857", bg="#F1F5F9")
+        self.lbl_merge_status.pack(pady=4)
+
+    # =========================================================================
+    # TAB 5: 🔍 VERIFY
+    # =========================================================================
+    def _build_tab_verify(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        card1 = self._create_3d_card(outer, pady=(0, 8))
+        tk.Label(card1, text="1. Select Digitally Signed PDF to Verify", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        v_row = tk.Frame(card1, bg="#FFFFFF")
+        v_row.pack(fill=tk.X, pady=(2, 4))
+        ttk.Entry(v_row, textvariable=self.verify_pdf_path, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(v_row, text="Browse PDF...", style="Tool3D.TButton", command=self.verify_browse_file).pack(side=tk.RIGHT)
+
+        ttk.Button(card1, text="🔍 VERIFY DIGITAL SIGNATURES", style="Primary3D.TButton", command=self.start_verification).pack(fill=tk.X, ipady=4, pady=(6, 2))
+
+        card2 = self._create_3d_card(outer, pady=(0, 8))
+        tk.Label(card2, text="2. Cryptographic Verification Results", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        self.lbl_verify_banner = tk.Label(card2, text="Select a signed PDF and click 'Verify Digital Signatures'.", font=get_sys_font(10, "bold"), fg="#64748B", bg="#F8FAFC", padx=8, pady=8, relief=tk.SOLID, bd=1)
+        self.lbl_verify_banner.pack(fill=tk.X, pady=(0, 6))
+
+        self.txt_verify_report = tk.Text(card2, height=14, font=get_sys_font(8), bg="#FFFFFF", bd=1, relief=tk.SOLID)
+        self.txt_verify_report.pack(fill=tk.BOTH, expand=True)
+
+    # =========================================================================
+    # TAB 6: 🛠️ TOOLS (Split, Rotate, Extract, Delete, Protect, Unlock)
+    # =========================================================================
+    def _build_tab_tools(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        nb_tools = ttk.Notebook(outer)
+        nb_tools.pack(fill=tk.BOTH, expand=True)
+
+        f_split = ttk.Frame(nb_tools, padding=12)
+        nb_tools.add(f_split, text=" Split PDF ")
+        self._build_tool_split(f_split)
+
+        f_rot = ttk.Frame(nb_tools, padding=12)
+        nb_tools.add(f_rot, text=" Rotate Pages ")
+        self._build_tool_rotate(f_rot)
+
+        f_ext = ttk.Frame(nb_tools, padding=12)
+        nb_tools.add(f_ext, text=" Extract Pages ")
+        self._build_tool_extract(f_ext)
+
+        f_del = ttk.Frame(nb_tools, padding=12)
+        nb_tools.add(f_del, text=" Delete Pages ")
+        self._build_tool_delete(f_del)
+
+        f_prot = ttk.Frame(nb_tools, padding=12)
+        nb_tools.add(f_prot, text=" Protect / Encrypt ")
+        self._build_tool_protect(f_prot)
+
+        f_unl = ttk.Frame(nb_tools, padding=12)
+        nb_tools.add(f_unl, text=" Unlock / Decrypt ")
+        self._build_tool_unlock(f_unl)
+
+    def _build_tool_split(self, parent):
+        tk.Label(parent, text="Select PDF to Split:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r1 = tk.Frame(parent); r1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r1, textvariable=self.tool_split_pdf, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.tool_split_pdf)).pack(side=tk.RIGHT)
+
+        tk.Radiobutton(parent, text="Split each page into a separate PDF file", variable=self.tool_split_mode, value="single", font=get_sys_font(8)).pack(anchor=tk.W)
+        r2 = tk.Frame(parent); r2.pack(fill=tk.X, pady=(2, 6))
+        tk.Radiobutton(r2, text="Split by page ranges (e.g. 1-3, 4-6):", variable=self.tool_split_mode, value="range", font=get_sys_font(8)).pack(side=tk.LEFT)
+        ttk.Entry(r2, textvariable=self.tool_split_ranges, width=20).pack(side=tk.LEFT, padx=6)
+
+        tk.Label(parent, text="Output Folder:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r3 = tk.Frame(parent); r3.pack(fill=tk.X, pady=(2, 10))
+        ttk.Entry(r3, textvariable=self.tool_split_out_dir, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r3, text="Browse Folder...", style="Tool3D.TButton", command=lambda: self._browse_single_folder(self.tool_split_out_dir)).pack(side=tk.RIGHT)
+
+        ttk.Button(parent, text="✂️ SPLIT PDF", style="Primary3D.TButton", command=self.exec_split_pdf).pack(fill=tk.X, ipady=4)
+        self.lbl_tool_split_status = tk.Label(parent, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_tool_split_status.pack(pady=4)
+
+    def _build_tool_rotate(self, parent):
+        tk.Label(parent, text="Select PDF to Rotate:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r1 = tk.Frame(parent); r1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r1, textvariable=self.tool_rot_pdf, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.tool_rot_pdf)).pack(side=tk.RIGHT)
+
+        tk.Label(parent, text="Rotation Angle:", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        a_row = tk.Frame(parent); a_row.pack(fill=tk.X, pady=(2, 6))
+        tk.Radiobutton(a_row, text="90° Clockwise", variable=self.tool_rot_angle, value=90).pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(a_row, text="180° Half Turn", variable=self.tool_rot_angle, value=180).pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(a_row, text="270° Counter-Clockwise", variable=self.tool_rot_angle, value=270).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(parent, text="Pages to Rotate:", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        s_row = tk.Frame(parent); s_row.pack(fill=tk.X, pady=(2, 10))
+        tk.Radiobutton(s_row, text="All pages", variable=self.tool_rot_scope, value="all").pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(s_row, text="Even pages", variable=self.tool_rot_scope, value="even").pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(s_row, text="Odd pages", variable=self.tool_rot_scope, value="odd").pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(s_row, text="Specific pages:", variable=self.tool_rot_scope, value="specific").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(s_row, textvariable=self.tool_rot_spec, width=12).pack(side=tk.LEFT)
+
+        ttk.Button(parent, text="🔄 ROTATE & SAVE PDF", style="Primary3D.TButton", command=self.exec_rotate_pdf).pack(fill=tk.X, ipady=4)
+        self.lbl_tool_rot_status = tk.Label(parent, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_tool_rot_status.pack(pady=4)
+
+    def _build_tool_extract(self, parent):
+        tk.Label(parent, text="Select PDF to Extract Pages From:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r1 = tk.Frame(parent); r1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r1, textvariable=self.tool_ext_pdf, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.tool_ext_pdf)).pack(side=tk.RIGHT)
+
+        tk.Label(parent, text="Page Numbers to Extract (e.g. 1-3, 5, 8):", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        ttk.Entry(parent, textvariable=self.tool_ext_pages, font=get_sys_font(8)).pack(fill=tk.X, pady=(2, 10))
+
+        ttk.Button(parent, text="📤 EXTRACT PAGES", style="Primary3D.TButton", command=self.exec_extract_pages).pack(fill=tk.X, ipady=4)
+        self.lbl_tool_ext_status = tk.Label(parent, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_tool_ext_status.pack(pady=4)
+
+    def _build_tool_delete(self, parent):
+        tk.Label(parent, text="Select PDF to Delete Pages From:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r1 = tk.Frame(parent); r1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r1, textvariable=self.tool_del_pdf, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.tool_del_pdf)).pack(side=tk.RIGHT)
+
+        tk.Label(parent, text="Page Numbers to Delete (e.g. 2, 4, 6):", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        ttk.Entry(parent, textvariable=self.tool_del_pages, font=get_sys_font(8)).pack(fill=tk.X, pady=(2, 10))
+
+        ttk.Button(parent, text="🗑️ DELETE PAGES & SAVE", style="Primary3D.TButton", command=self.exec_delete_pages).pack(fill=tk.X, ipady=4)
+        self.lbl_tool_del_status = tk.Label(parent, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_tool_del_status.pack(pady=4)
+
+    def _build_tool_protect(self, parent):
+        tk.Label(parent, text="Select PDF to Encrypt & Protect:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r1 = tk.Frame(parent); r1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r1, textvariable=self.tool_prot_pdf, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.tool_prot_pdf)).pack(side=tk.RIGHT)
+
+        grid = tk.Frame(parent)
+        grid.pack(fill=tk.X, pady=(2, 6))
+        tk.Label(grid, text="Open Password (User):", font=get_sys_font(8, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Entry(grid, textvariable=self.tool_prot_open, show="*").grid(row=0, column=1, padx=4, sticky="ew")
+        tk.Label(grid, text="Permissions Password (Owner):", font=get_sys_font(8, "bold")).grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(grid, textvariable=self.tool_prot_perm, show="*").grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+
+        p_row = tk.Frame(parent); p_row.pack(fill=tk.X, pady=(2, 10))
+        tk.Checkbutton(p_row, text="Allow Printing", variable=self.tool_prot_print).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(p_row, text="Allow Copying Text", variable=self.tool_prot_copy).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(p_row, text="Allow Editing", variable=self.tool_prot_edit).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(parent, text="🔒 ENCRYPT WITH 256-BIT AES", style="Primary3D.TButton", command=self.exec_protect_pdf).pack(fill=tk.X, ipady=4)
+        self.lbl_tool_prot_status = tk.Label(parent, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_tool_prot_status.pack(pady=4)
+
+    def _build_tool_unlock(self, parent):
+        tk.Label(parent, text="Select Password-Protected PDF to Unlock:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r1 = tk.Frame(parent); r1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r1, textvariable=self.tool_unl_pdf, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.tool_unl_pdf)).pack(side=tk.RIGHT)
+
+        tk.Label(parent, text="Enter PDF Password to Unlock:", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        ttk.Entry(parent, textvariable=self.tool_unl_pw, show="*").pack(fill=tk.X, pady=(2, 10))
+
+        ttk.Button(parent, text="🔓 UNLOCK & DECRYPT PDF", style="Primary3D.TButton", command=self.exec_unlock_pdf).pack(fill=tk.X, ipady=4)
+        self.lbl_tool_unl_status = tk.Label(parent, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_tool_unl_status.pack(pady=4)
+
+    # =========================================================================
+    # TAB 7: 📖 OCR & EDIT (License Integrated Feature)
+    # =========================================================================
+    def _build_tab_ocr_edit(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        is_lic = LicenseManager.is_activated()
+        lic_box = tk.Frame(outer, bg="#ECFDF5" if is_lic else "#FFFBEB", relief=tk.SOLID, bd=1, padx=10, pady=8)
+        lic_box.pack(fill=tk.X, pady=(0, 8))
+        if is_lic:
+            tk.Label(lic_box, text="⭐ Professional Suite Active: OCR Recognition, Text Redaction & Watermarking Unlocked", font=get_sys_font(9, "bold"), fg="#065F46", bg="#ECFDF5").pack(side=tk.LEFT)
         else:
-            self.token_panel.pack_forget()
-            self.pfx_panel.pack(fill=tk.X, before=self.card4_shadow)
-            self.lbl_status.config(text="Switched to .P12 / .PFX Certificate File Mode.", foreground="#0F766E")
+            tk.Label(lic_box, text="🔒 Professional Feature: Activate License to Unlock Full PDF OCR Recognition & Redaction", font=get_sys_font(9, "bold"), fg="#92400E", bg="#FFFBEB").pack(side=tk.LEFT)
+            ttk.Button(lic_box, text="Activate License", style="BuyDSC.TButton", command=self._show_activation_screen).pack(side=tk.RIGHT)
 
-    def _on_driver_selected(self, event=None):
-        selected = self.driver_var.get()
-        if selected in ["__CUSTOM__", "➕ [Add Custom Token Driver...]", "[Browse Custom Driver Library...]"]:
-            self.open_settings_dialog(initial_tab="drivers")
+        nb_ocr = ttk.Notebook(outer)
+        nb_ocr.pack(fill=tk.BOTH, expand=True)
+
+        f_ocr = ttk.Frame(nb_ocr, padding=10)
+        nb_ocr.add(f_ocr, text=" OCR & Text Extraction ")
+        
+        tk.Label(f_ocr, text="Select PDF for OCR & Text Extraction:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r1 = tk.Frame(f_ocr); r1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r1, textvariable=self.ocr_pdf_path, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.ocr_pdf_path)).pack(side=tk.RIGHT)
+
+        r2 = tk.Frame(f_ocr); r2.pack(fill=tk.X, pady=(2, 6))
+        tk.Label(r2, text="Pages to Process:", font=get_sys_font(8, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(r2, textvariable=self.ocr_page_scope, width=12).pack(side=tk.LEFT, padx=4)
+        tk.Label(r2, text="(e.g. 'all' or '1-5')", font=get_sys_font(8, "italic"), fg="#64748B").pack(side=tk.LEFT)
+
+        ttk.Button(f_ocr, text="🔍 RUN OCR & EXTRACT TEXT", style="Primary3D.TButton", command=self.exec_ocr_extract).pack(fill=tk.X, ipady=4, pady=(2, 6))
+
+        tk.Label(f_ocr, text="Extracted Content Preview:", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        self.txt_ocr_preview = tk.Text(f_ocr, height=10, font=get_sys_font(8), bg="#FFFFFF", bd=1, relief=tk.SOLID)
+        self.txt_ocr_preview.pack(fill=tk.BOTH, expand=True, pady=(2, 4))
+
+        b_row = tk.Frame(f_ocr)
+        b_row.pack(fill=tk.X)
+        ttk.Button(b_row, text="💾 Save to .TXT File", style="Tool3D.TButton", command=self.save_ocr_to_file).pack(side=tk.LEFT)
+
+        f_redact = ttk.Frame(nb_ocr, padding=10)
+        nb_ocr.add(f_redact, text=" Search & Redact / Replace ")
+
+        tk.Label(f_redact, text="Select PDF to Redact Sensitive Text (Aadhaar, PAN, phone numbers, etc.):", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        r_f1 = tk.Frame(f_redact); r_f1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(r_f1, textvariable=self.redact_pdf_path, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(r_f1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.redact_pdf_path)).pack(side=tk.RIGHT)
+
+        tk.Label(f_redact, text="Text to Search & Redact:", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        ttk.Entry(f_redact, textvariable=self.redact_term_var, font=get_sys_font(8)).pack(fill=tk.X, pady=(2, 6))
+
+        tk.Radiobutton(f_redact, text="Redact permanently (Blackout / Cover sensitive text)", variable=self.redact_mode_var, value="blackout", font=get_sys_font(8, "bold"), fg="#DC2626").pack(anchor=tk.W)
+        r_f2 = tk.Frame(f_redact); r_f2.pack(fill=tk.X, pady=(2, 10))
+        tk.Radiobutton(r_f2, text="Replace text with:", variable=self.redact_mode_var, value="replace", font=get_sys_font(8)).pack(side=tk.LEFT)
+        ttk.Entry(r_f2, textvariable=self.redact_replace_var, font=get_sys_font(8), width=24).pack(side=tk.LEFT, padx=6)
+
+        ttk.Button(f_redact, text="🔒 APPLY REDACTION & SAVE PDF", style="Primary3D.TButton", command=self.exec_search_and_redact).pack(fill=tk.X, ipady=4)
+        self.lbl_redact_status = tk.Label(f_redact, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_redact_status.pack(pady=4)
+
+        f_wm = ttk.Frame(nb_ocr, padding=10)
+        nb_ocr.add(f_wm, text=" Text Watermark ")
+
+        tk.Label(f_wm, text="Select PDF to Add Watermark:", font=get_sys_font(9, "bold"), fg="#1E40AF").pack(anchor=tk.W)
+        wm_f1 = tk.Frame(f_wm); wm_f1.pack(fill=tk.X, pady=(2, 6))
+        ttk.Entry(wm_f1, textvariable=self.wm_pdf_path, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(wm_f1, text="Browse...", style="Tool3D.TButton", command=lambda: self._browse_single_file(self.wm_pdf_path)).pack(side=tk.RIGHT)
+
+        tk.Label(f_wm, text="Watermark Text (e.g. CONFIDENTIAL, DRAFT, APPROVED):", font=get_sys_font(8, "bold")).pack(anchor=tk.W)
+        ttk.Entry(f_wm, textvariable=self.wm_text_var, font=get_sys_font(8)).pack(fill=tk.X, pady=(2, 6))
+
+        wm_opts = tk.Frame(f_wm); wm_opts.pack(fill=tk.X, pady=(2, 10))
+        tk.Label(wm_opts, text="Angle:", font=get_sys_font(8, "bold")).pack(side=tk.LEFT)
+        tk.Radiobutton(wm_opts, text="45° Diagonal", variable=self.wm_angle_var, value=45).pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(wm_opts, text="0° Horizontal", variable=self.wm_angle_var, value=0).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(f_wm, text="💧 APPLY WATERMARK & SAVE", style="Primary3D.TButton", command=self.exec_add_watermark).pack(fill=tk.X, ipady=4)
+        self.lbl_wm_status = tk.Label(f_wm, text="", font=get_sys_font(8, "bold"), fg="#047857")
+        self.lbl_wm_status.pack(pady=4)
+
+    # =========================================================================
+    # TAB 8: ℹ️ ABOUT & LICENSE
+    # =========================================================================
+    def _build_tab_about(self, parent):
+        outer = tk.Frame(parent, bg="#F1F5F9")
+        outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
+
+        card1 = self._create_3d_card(outer, pady=(0, 10))
+        tk.Label(card1, text="A B INFOTECH", font=get_sys_font(14, "bold"), fg="#1E3A8A", bg="#FFFFFF").pack(anchor=tk.W)
+        tk.Label(card1, text="Unified Digital Signer & All-in-One PDF Power Suite v2.0", font=get_sys_font(9, "bold"), fg="#059669", bg="#FFFFFF").pack(anchor=tk.W, pady=(2, 6))
+        tk.Label(card1, text="A high-performance cryptographic and document processing workstation supporting USB hardware tokens, PKCS#12 certificates, compression, merging, image stamps, verification, redaction, and OCR.", font=get_sys_font(8), fg="#475569", bg="#FFFFFF", wraplength=700, justify="left").pack(anchor=tk.W)
+
+        card2 = self._create_3d_card(outer, pady=(0, 10))
+        tk.Label(card2, text="License & System Information", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+
+        lic_data = LicenseManager.get_license_data() or {}
+        exp_date = lic_data.get("expiredate", "Unknown")
+        key_val = LicenseManager.get_license_key() or "Not Installed"
+        hw_id = LicenseManager.get_hardware_id()
+
+        tk.Label(card2, text=f"• Machine / Hardware ID: {hw_id}", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• License Key: {key_val}", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• Expiry Date: {exp_date}", font=get_sys_font(8, "bold"), fg="#047857" if exp_date != "expired" else "#DC2626", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• Platform: {CURRENT_OS} ({platform.machine()})", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+
+        btn_row = tk.Frame(outer, bg="#F1F5F9")
+        btn_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(btn_row, text="🔑 Enter License Key", style="Tool3D.TButton", command=self._show_activation_screen).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="🛒 Buy DSC / Renew License Online", style="Primary3D.TButton", command=self.open_buy_dsc).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="⚙️ Manage Token Drivers", style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="💬 WhatsApp: 9752318084", style="Tool3D.TButton", command=self.open_whatsapp).pack(side=tk.LEFT, padx=4)
+
+    # =========================================================================
+    # TAB 1 OPERATIONS (Sign PDF)
+    # =========================================================================
+    def sign_add_files(self):
+        paths = filedialog.askopenfilenames(title="Select PDF Files to Sign", filetypes=[("PDF Files", "*.pdf")])
+        if paths:
+            for p in paths:
+                if p not in self.sign_pdf_files:
+                    self.sign_pdf_files.append(p)
+                    self.sign_listbox.insert(tk.END, os.path.basename(p))
+            self.lbl_sign_status.config(text=f"Added {len(paths)} file(s). Total: {len(self.sign_pdf_files)} PDF(s).")
+
+    def sign_add_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder Containing PDFs")
+        if folder:
+            count = 0
+            for f in os.listdir(folder):
+                if f.lower().endswith(".pdf"):
+                    full = os.path.join(folder, f)
+                    if full not in self.sign_pdf_files:
+                        self.sign_pdf_files.append(full)
+                        self.sign_listbox.insert(tk.END, f)
+                        count += 1
+            self.lbl_sign_status.config(text=f"Found & added {count} PDF(s) from folder. Total: {len(self.sign_pdf_files)} PDF(s).")
+
+    def sign_remove_selected(self):
+        sel = list(self.sign_listbox.curselection())
+        for idx in reversed(sel):
+            self.sign_listbox.delete(idx)
+            del self.sign_pdf_files[idx]
+        self.lbl_sign_status.config(text=f"Total files in queue: {len(self.sign_pdf_files)}")
+
+    def sign_clear(self):
+        self.sign_listbox.delete(0, tk.END)
+        self.sign_pdf_files.clear()
+        self.lbl_sign_status.config(text="Queue cleared.")
+
+    def sign_browse_out_folder(self):
+        folder = filedialog.askdirectory(title="Select Output Folder for Signed PDFs")
+        if folder:
+            self.sign_output_folder.set(folder)
+            self.sign_output_mode.set("folder")
+
+    def load_token_certificates(self):
+        driver_name = self.driver_var.get()
+        driver_path = DRIVER_MAP.get(driver_name)
+        if not driver_path or not os.path.exists(driver_path):
+            self.token_cert_combo['values'] = ["No driver found / Select driver"]
+            return
+
+        def _worker():
+            try:
+                lib = pkcs11.lib(driver_path)
+                slots = lib.get_slots(token_present=True)
+                if not slots:
+                    self.root.after(0, lambda: self.token_cert_combo.config(values=["No Token Detected. Insert USB Token."]))
+                    return
+                slot = slots[0]
+                token = slot.get_token()
+                certs_found = []
+                self.token_certs.clear()
+                with token.open() as session:
+                    for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
+                        raw_der = obj[pkcs11.Attribute.VALUE]
+                        c = x509.load_der_x509_certificate(raw_der)
+                        cn = "Unknown"
+                        for attr in c.subject:
+                            if attr.oid == x509.NameOID.COMMON_NAME:
+                                cn = attr.value
+                                break
+                        certs_found.append(f"{cn} (SN: {c.serial_number})")
+                        self.token_certs.append({"cn": cn, "cert": c, "obj": obj})
+
+                if certs_found:
+                    self.root.after(0, lambda: self._apply_token_certs(certs_found))
+                else:
+                    self.root.after(0, lambda: self.token_cert_combo.config(values=["No certificates found in token"]))
+            except Exception as e:
+                logger.warning(f"Token cert load note: {e}")
+                self.root.after(0, lambda: self.token_cert_combo.config(values=[f"Token Read: {str(e)[:40]}"]))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_token_certs(self, certs_list):
+        self.token_cert_combo['values'] = certs_list
+        if certs_list:
+            self.token_cert_combo.current(0)
+            self.lbl_sign_status.config(text=f"✓ Token detected: {certs_list[0]}", foreground="#047857")
 
     def browse_pfx_file(self):
-        ftypes = [("PKCS#12 Certificates (*.p12;*.pfx)", "*.p12;*.pfx;*.P12;*.PFX"), ("All Files", "*.*")]
-        path = filedialog.askopenfilename(title="Select .P12 / .PFX Certificate File", filetypes=ftypes)
-        if path:
-            self.pfx_path_var.set(path)
+        f = filedialog.askopenfilename(title="Select .PFX / .P12 File", filetypes=[("PKCS#12 Certificates", "*.pfx;*.p12")])
+        if f:
+            self.pfx_path_var.set(f)
             self.verify_pfx_certificate(silent=False)
 
     def verify_pfx_certificate(self, silent=False):
         path = self.pfx_path_var.get().strip()
         pwd = self.pfx_pass_var.get()
-        if not path:
-            if not silent: messagebox.showerror("Error", "Please select a .p12/.pfx file first.")
+        if not path or not os.path.exists(path):
+            if not silent: messagebox.showerror("Error", "Please select a valid .pfx/.p12 file first.")
             return False
 
-        try:
-            signer, cert_parsed = load_pfx_signer_and_cert(path, pwd)
-            cn_name = "Unknown"
-            try:
-                cn_attrs = cert_parsed.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
-                if cn_attrs: cn_name = str(cn_attrs[0].value)
-            except Exception: pass
-
-            exp_str = cert_parsed.not_valid_after_utc.strftime('%d-%b-%Y')
-            info_text = f"✓ Ready: {cn_name}\nValid Until: {exp_str}"
-            self.lbl_pfx_details.config(text=info_text, fg="#059669")
-            self.lbl_status.config(text=f"PFX Unlocked: {cn_name}", foreground="#059669")
+        signer, cert = load_pfx_signer_and_cert(path, pwd)
+        if signer and cert:
+            self.pfx_loaded_cert = cert
+            cn = "Certificate Owner"
+            for attr in cert.subject:
+                if attr.oid == x509.NameOID.COMMON_NAME:
+                    cn = attr.value
+                    break
+            self.lbl_pfx_info.config(text=f"✓ Valid: {cn} (Exp: {cert.not_valid_after_utc.strftime('%Y-%m-%d')})", fg="#047857")
+            if not silent: messagebox.showinfo("Success", f"Certificate unlocked successfully:\n\n{cn}")
             return True
-        except Exception as e:
-            err = str(e)
-            self.lbl_pfx_details.config(text=f"❌ Verification failed:\n{err}", fg="#EF4444")
-            if not silent: messagebox.showerror("PFX Error", err)
+        else:
+            self.lbl_pfx_info.config(text="❌ Invalid password or corrupt certificate.", fg="#DC2626")
+            if not silent: messagebox.showerror("Failed", "Could not unlock certificate with the provided password.")
             return False
 
-    def load_certificates(self):
-        driver = DRIVER_MAP.get(self.driver_var.get())
-        if not driver or driver == "__CUSTOM__":
-            self.open_settings_dialog(initial_tab="drivers")
+    def load_win_store_certificates(self):
+        store_choice = "MY" if "MY" in self.win_store_var.get() else "ROOT"
+        certs = WinCertStore.get_certificates(store_choice)
+        self.win_store_certs = certs
+        if certs:
+            vals = [f"{c['common_name']} ({c['expiry']})" for c in certs]
+            self.win_cert_combo['values'] = vals
+            self.win_cert_combo.current(0)
+            self.lbl_sign_status.config(text=f"Loaded {len(certs)} certificate(s) from Windows store.")
+        else:
+            self.win_cert_combo['values'] = ["No certificates found in Windows store"]
+
+    def browse_sign_logo(self):
+        f = filedialog.askopenfilename(title="Select Signature Stamp Logo", filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp")])
+        if f:
+            self.sign_logo_path_var.set(f)
+
+    def open_sign_position_picker(self):
+        pdf_to_view = self.sign_pdf_files[0] if self.sign_pdf_files else None
+        if not pdf_to_view or not os.path.exists(pdf_to_view):
+            pdf_to_view = filedialog.askopenfilename(title="Select PDF to Choose Signature Position", filetypes=[("PDF", "*.pdf")])
+
+        if not pdf_to_view:
+            messagebox.showinfo("Note", "Please add at least one PDF or select a template PDF to view pages.")
             return
 
-        if not os.path.exists(driver):
-            if "ePass" in self.driver_var.get():
-                driver = find_epass_driver_path()
-                DRIVER_MAP[self.driver_var.get()] = driver
-            if not os.path.exists(driver):
-                messagebox.showerror("Driver Missing", f"Could not find driver library at:\n\n{driver}\n\nPlease install your Token middleware or browse for the correct library.")
-                return
-
-        try:
-            self.loaded_certs = []
-            lib = pkcs11.lib(driver)
-            for slot in lib.get_slots(token_present=True):
-                try:
-                    token = slot.get_token()
-                    with token.open() as session:
-                        for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
-                            cert = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
-                            try:
-                                if cert.subject == cert.issuer: continue
-                            except Exception: pass
-
-                            try:
-                                key_usage = cert.extensions.get_extension_for_class(x509.KeyUsage).value
-                                if not (key_usage.digital_signature or key_usage.content_commitment): continue
-                            except x509.ExtensionNotFound: pass
-
-                            cn = "Unknown"
-                            for attr in cert.subject:
-                                if attr.oid == x509.NameOID.COMMON_NAME:
-                                    cn = attr.value; break
-
-                            self.loaded_certs.append({
-                                'alias': str(cert.serial_number),
-                                'cn': cn,
-                                'source': token.label
-                            })
-                except Exception: continue
-
-            self.cert_combo['values'] = [f"{c['cn']} ({c['source']})" for c in self.loaded_certs]
-            if self.loaded_certs: self.cert_combo.current(0)
-            self.lbl_status.config(text="Hardware Token certificates loaded.", foreground="green")
-
-        except Exception as e:
-            err_msg = str(e)
-            if not err_msg.strip(): err_msg = "Please ensure USB Token is connected."
-            ask = messagebox.askyesno("Hardware Token Not Found", f"{err_msg}\n\nWould you like to use a .p12 / .pfx file to sign instead?", parent=self.root)
-            if ask:
-                self.cert_source_var.set("pfx")
-                self._on_cert_source_changed()
-
-    def update_area_list_ui(self):
-        for widget in self.area_container.winfo_children():
-            widget.destroy()
-
-        if not self.signature_areas:
-            self.lbl_no_areas = tk.Label(
-                self.area_container, text="No area selected yet.\nClick '✏️ Draw Signature Box' or open a PDF.",
-                bg="#F8FAFC", fg="#64748B", font=get_sys_font(8), justify="center"
+        def _on_area_set(area):
+            self.sign_selected_area = area
+            self.lbl_sign_pos_info.config(
+                text=f"📍 Selected: X={int(area['x'])} pt, Y={int(area['y'])} pt | W={int(area['width'])} pt, H={int(area['height'])} pt (Page {int(area.get('page', 0))+1})"
             )
-            self.lbl_no_areas.pack(expand=True)
+
+        SignatureAreaPickerWindow(self.root, pdf_to_view, _on_area_set, initial_area=self.sign_selected_area, title="Choose Signature Position & Size on Page")
+
+    def start_document_signing(self):
+        if not self.sign_pdf_files:
+            messagebox.showerror("Error", "Please add at least one PDF document to sign.")
             return
 
-        if self.all_pages_var.get() and len(self.signature_areas) > 0:
-            first = self.signature_areas[0]
-            desc = f"W: {int(first['width'])} x H: {int(first['height'])}"
-            tk.Label(
-                self.area_container, text=f"✓ All Pages ({len(self.signature_areas)} pages) — {desc}",
-                bg="#F8FAFC", fg="#059669", font=get_sys_font(8, "bold"), justify="left"
-            ).pack(anchor=tk.W, padx=6, pady=2)
-        else:
-            for idx, area in enumerate(self.signature_areas):
-                txt = f"[{idx+1}] Page {area['page']+1} — W: {int(area['width'])} x H: {int(area['height'])}"
-                tk.Label(self.area_container, text=txt, bg="#F8FAFC", fg="#1E3A8A", font=get_sys_font(8)).pack(anchor=tk.W, padx=6, pady=1)
+        mode = self.cert_source_var.get()
+        active_tab_text = self.nb_dsc.tab(self.nb_dsc.select(), "text")
 
-    def on_all_pages_toggle(self):
-        if self.all_pages_var.get():
-            if self.pdf_doc and self.signature_areas:
-                self._apply_area_to_all_pages_memory()
-                self.update_area_list_ui()
-                self.render_page()
-            self.lbl_status.config(text="Apply to all pages enabled. All pages will be signed.", foreground="#059669")
-        else:
-            if self.pdf_doc and self.signature_areas:
-                self.signature_areas = [a for a in self.signature_areas if a['page'] == self.current_page]
-                self.update_area_list_ui()
-                self.render_page()
-            self.lbl_status.config(text="Single page signature mode.", foreground="#1E3A8A")
+        signer = None
+        cert_parsed = None
 
-    def _apply_area_to_all_pages_memory(self):
-        if not self.pdf_doc or not self.signature_areas: return
-        total_pages = len(self.pdf_doc)
-        template = self.signature_areas[0]
-
-        new_areas = []
-        for p in range(total_pages):
-            rect = self.pdf_doc[p].rect
-            pw, ph = float(rect.width), float(rect.height)
-            ax = float(template['x'])
-            ay = float(template['y'])
-            aw = min(float(template['width']), pw - ax)
-            ah = min(float(template['height']), ph - ay)
-            cx1 = template.get('c_x1', ax * self.scale)
-            cy1 = template.get('c_y1', (ph - (ay + ah)) * self.scale)
-            cx2 = template.get('c_x2', (ax + aw) * self.scale)
-            cy2 = template.get('c_y2', (ph - ay) * self.scale)
-
-            new_areas.append({
-                'page': p,
-                'x': ax, 'y': ay,
-                'width': aw, 'height': ah,
-                'c_x1': cx1, 'c_y1': cy1,
-                'c_x2': cx2, 'c_y2': cy2
-            })
-        self.signature_areas = new_areas
-
-    def load_pdf_file(self, path):
-        if not path or not os.path.exists(path): return False
-        try:
-            if self.pdf_doc:
-                try: self.pdf_doc.close()
-                except Exception: pass
-            self.input_pdf_path = path
-            self.pdf_doc = fitz.open(path)
-            self.current_page = 0
-            self.signature_areas.clear()
-            self.update_area_list_ui()
-
-            for btn in [self.btn_prev, self.btn_next, self.btn_draw, self.btn_sign, self.btn_clear_pdf]:
-                btn.config(state=tk.NORMAL)
-            self.render_page()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to open PDF {path}: {e}")
-            return False
-
-    def open_pdf(self):
-        if self.bulk_mode:
-            if not messagebox.askyesno("Exit Bulk Mode", "You are currently in Bulk Sign Mode.\nDo you want to exit Bulk Mode and open a single PDF?", parent=self.root):
+        if "USB Token" in active_tab_text:
+            driver_name = self.driver_var.get()
+            driver_path = DRIVER_MAP.get(driver_name)
+            pin = self.pin_var.get().strip()
+            if not pin:
+                messagebox.showerror("PIN Required", "Please enter your Hardware Token PIN.")
                 return
-            self.exit_bulk_mode(confirm=False)
+            if not driver_path or not os.path.exists(driver_path):
+                messagebox.showerror("Driver Error", "Selected PKCS#11 driver was not found.")
+                return
 
-        path = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
-        if not path: return
-        self.load_pdf_file(path)
-
-    def clear_pdf(self):
-        if self.bulk_mode:
-            self.exit_bulk_mode(confirm=False)
-        if self.pdf_doc:
-            try: self.pdf_doc.close()
-            except Exception: pass
-        self.pdf_doc = None
-        self.input_pdf_path = None
-        self.current_page = 0
-        self.signature_areas.clear()
-        self.update_area_list_ui()
-        self.canvas.delete("all")
-        self.lbl_page.config(text="Page 0 / 0")
-        for btn in [self.btn_prev, self.btn_next, self.btn_draw, self.btn_sign, self.btn_clear_pdf]:
-            btn.config(state=tk.DISABLED)
-
-    def render_page(self):
-        if not self.pdf_doc: return
-        self.lbl_page.config(text=f"Page {self.current_page + 1} / {len(self.pdf_doc)}")
-        pix = self.pdf_doc[self.current_page].get_pixmap(matrix=fitz.Matrix(self.scale, self.scale))
-        self.tk_img = ImageTk.PhotoImage(Image.frombytes("RGB", [pix.width, pix.height], pix.samples))
-
-        self.canvas.delete("all")
-        # Soft ambient 3D page drop shadow (simulates elevated physical document)
-        self.canvas.create_rectangle(
-            6, 6, pix.width + 6, pix.height + 6,
-            fill="#64748B", outline=""
-        )
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_img)
-        self.canvas.config(scrollregion=(0, 0, pix.width + 12, pix.height + 12))
-
-        for idx, area in enumerate(self.signature_areas):
-            if self.bulk_mode or area['page'] == self.current_page:
-                self.canvas.create_rectangle(
-                    area['c_x1'], area['c_y1'], area['c_x2'], area['c_y2'],
-                    outline="#0F766E", width=2, fill="#CCFBF1", stipple="gray25"
+            try:
+                signer = PKCS11Signer(
+                    pkcs11_lib=pkcs11.lib(driver_path),
+                    user_pin=pin,
+                    token_criteria=None,
+                    other_certs=None
                 )
-                box_title = "🔏 Bulk Signature (All Pages)" if self.bulk_mode else f"🔏 Signature (Box {idx+1})"
-                self.canvas.create_text(
-                    area['c_x1'] + 6, area['c_y1'] + 6, anchor=tk.NW,
-                    text=box_title, fill="#0F766E", font=get_sys_font(9, "bold")
-                )
+                if self.token_certs:
+                    sel_idx = self.token_cert_combo.current()
+                    if sel_idx >= 0 and sel_idx < len(self.token_certs):
+                        cert_parsed = self.token_certs[sel_idx]["cert"]
+            except Exception as e:
+                messagebox.showerror("Token Error", f"Failed to connect to USB Token:\n{e}")
+                return
 
-    def prev_page(self):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.render_page()
+        elif "PFX" in active_tab_text:
+            pfx_path = self.pfx_path_var.get().strip()
+            pfx_pwd = self.pfx_pass_var.get()
+            signer, cert_parsed = load_pfx_signer_and_cert(pfx_path, pfx_pwd)
+            if not signer or not cert_parsed:
+                messagebox.showerror("PFX Error", "Please verify your .PFX certificate file and password.")
+                return
+        else: # Windows Store
+            if not self.win_store_certs:
+                self.load_win_store_certificates()
+            sel_idx = self.win_cert_combo.current()
+            if sel_idx >= 0 and sel_idx < len(self.win_store_certs):
+                cert_parsed = self.win_store_certs[sel_idx]["cert_obj"]
+            messagebox.showinfo("Windows Store Note", "Windows Store certificate selected. If hardware token requires driver PIN, please use the USB Token tab.")
+            return
 
-    def next_page(self):
-        if self.current_page < len(self.pdf_doc) - 1:
-            self.current_page += 1
-            self.render_page()
-
-    def toggle_draw_mode(self):
-        self.drawing_mode = not self.drawing_mode
-        self.canvas.config(cursor="crosshair" if self.drawing_mode else "")
-        self.btn_draw.config(text="❌ Cancel Drawing" if self.drawing_mode else "✏️ Draw Signature Box")
-
-    def on_mouse_down(self, event):
-        if not self.drawing_mode: return
-        self.start_x = self.canvas.canvasx(event.x)
-        self.start_y = self.canvas.canvasy(event.y)
-        self.temp_rect = self.canvas.create_rectangle(
-            self.start_x, self.start_y, self.start_x, self.start_y,
-            outline="#0F766E", width=2, dash=(4, 4)
-        )
-
-    def on_mouse_drag(self, event):
-        if not self.drawing_mode or not self.temp_rect: return
-        self.canvas.coords(self.temp_rect, self.start_x, self.start_y, self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
-
-    def on_mouse_up(self, event):
-        if not self.drawing_mode or not self.temp_rect: return
-        cur_x, cur_y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
-        x1, x2 = sorted([self.start_x, cur_x])
-        y1, y2 = sorted([self.start_y, cur_y])
-
-        self.canvas.delete(self.temp_rect)
-        self.temp_rect = None
-        self.toggle_draw_mode()
-
-        if (x2 - x1) < 15 or (y2 - y1) < 15: return
-
-        real_h = self.pdf_doc[self.current_page].rect.height
-        pdf_x1, pdf_y1, pdf_x2, pdf_y2 = x1/self.scale, y1/self.scale, x2/self.scale, y2/self.scale
-
-        new_area = {
-            'page': self.current_page,
-            'x': pdf_x1, 'y': real_h - pdf_y2,
-            'width': pdf_x2 - pdf_x1, 'height': (real_h - pdf_y1) - (real_h - pdf_y2),
-            'c_x1': x1, 'c_y1': y1, 'c_x2': x2, 'c_y2': y2
+        area_opts = {
+            'heading': self.sign_heading_var.get().strip(),
+            'extra_line': self.sign_extra_line_var.get().strip(),
+            'reason': self.sign_reason_var.get().strip(),
+            'location': self.sign_location_var.get().strip(),
+            'show_name': self.chk_name_var.get(),
+            'show_date': self.chk_date_var.get(),
+            'show_reason': self.chk_reason_var.get(),
+            'show_location': self.chk_loc_var.get(),
+            'show_issuer': self.chk_issuer_var.get(),
+            'show_tick': self.chk_tick_var.get(),
+            'show_border': self.chk_border_var.get(),
+            'logo_path': self.sign_logo_path_var.get().strip() if self.sign_logo_path_var.get().strip() else None
         }
 
-        if self.bulk_mode:
-            self.signature_areas = [new_area]
-            self._apply_area_to_all_pages_memory()
-            self.btn_sign.config(
-                text=f"🚀 SIGN ALL {len(self.bulk_pdf_files)} PDFs (ALL PAGES)",
-                state=tk.NORMAL
-            )
-            self.lbl_status.config(
-                text=f"✓ Area selected! Click '🚀 SIGN ALL {len(self.bulk_pdf_files)} PDFs (ALL PAGES)' to sign all files.",
-                foreground="#047857"
-            )
-        elif self.all_pages_var.get():
-            self.signature_areas = [new_area]
-            self._apply_area_to_all_pages_memory()
-        else:
-            self.signature_areas.append(new_area)
+        protect_opts = {
+            'enabled': self.chk_protect_var.get(),
+            'open_password': self.protect_open_pw_var.get().strip(),
+            'permissions_password': self.protect_perm_pw_var.get().strip(),
+            'allow_printing': self.chk_allow_print.get(),
+            'allow_copying': self.chk_allow_copy.get(),
+            'allow_editing': self.chk_allow_edit.get()
+        }
 
-        self.update_area_list_ui()
-        self.render_page()
+        tst_client = None
+        tsa_choice = self.sign_tsa_var.get()
+        if "DigiCert" in tsa_choice:
+            tst_client = HTTPTimeStamper("http://timestamp.digicert.com")
+        elif "FreeTSA" in tsa_choice:
+            tst_client = HTTPTimeStamper("https://freetsa.org/tsr")
 
-    def clear_boxes(self):
-        if self.bulk_mode or self.all_pages_var.get():
-            self.signature_areas.clear()
-            if self.bulk_mode:
-                self.btn_sign.config(state=tk.DISABLED)
-                self.lbl_status.config(text="Signature area cleared. Draw a new box to set area for all PDFs.", foreground="#2563EB")
-        else:
-            self.signature_areas = [a for a in self.signature_areas if a['page'] != self.current_page]
-        self.update_area_list_ui()
-        self.render_page()
+        self.btn_sign_docs.config(state=tk.DISABLED, text="SIGNING IN PROGRESS...")
+        self.sign_progress['value'] = 0
+        self.sign_progress['maximum'] = len(self.sign_pdf_files)
 
-    def enter_bulk_mode(self, in_dir, out_dir, pdf_files):
-        self.bulk_mode = True
-        self.bulk_in_dir = in_dir
-        self.bulk_out_dir = out_dir
-        self.bulk_pdf_files = pdf_files
+        def _worker():
+            success_count = 0
+            err_count = 0
+            last_out_dir = None
 
-        # Open the first PDF as the sample in the viewer
-        first_pdf_path = os.path.join(in_dir, pdf_files[0])
-        success = self.load_pdf_file(first_pdf_path)
-        if not success:
-            messagebox.showerror("Error", f"Failed to open sample PDF:\n{first_pdf_path}")
-            self.exit_bulk_mode(confirm=False)
-            return
+            for idx, pdf_path in enumerate(self.sign_pdf_files):
+                try:
+                    self.root.after(0, lambda i=idx, p=pdf_path: self.lbl_sign_status.config(text=f"Signing ({i+1}/{len(self.sign_pdf_files)}): {os.path.basename(p)}..."))
+                    with open(pdf_path, 'rb') as f:
+                        pdf_bytes = f.read()
 
-        # Show bulk mode banner above the canvas
-        self.bulk_banner_lbl.config(
-            text=f"📁 BULK SIGN MODE: [{len(pdf_files)} PDF(s)] — Draw signature box on the document below to sign ALL pages of ALL PDFs"
-        )
-        self.bulk_banner_frame.pack(fill=tk.X, before=self.canvas_frame, padx=8, pady=(4, 0))
-
-        # Update Sign Button for bulk operation
-        self.btn_sign.config(
-            text=f"🚀 SIGN ALL {len(pdf_files)} PDFs (ALL PAGES)",
-            state=tk.DISABLED
-        )
-
-        # Automatically activate drawing mode so user can immediately click & drag
-        if not self.drawing_mode:
-            self.toggle_draw_mode()
-
-        self.lbl_status.config(
-            text=f"📁 Bulk Mode: Sample '{pdf_files[0]}' loaded. Click and drag on document to select area.",
-            foreground="#2563EB"
-        )
-
-    def exit_bulk_mode(self, confirm=False):
-        if confirm:
-            if not messagebox.askyesno("Exit Bulk Mode", "Do you want to exit Bulk Sign Mode?", parent=self.root):
-                return
-        self.bulk_mode = False
-        self.bulk_in_dir = None
-        self.bulk_out_dir = None
-        self.bulk_pdf_files = []
-        if hasattr(self, 'bulk_banner_frame'):
-            self.bulk_banner_frame.pack_forget()
-        if hasattr(self, 'btn_sign'):
-            self.btn_sign.config(
-                text="✍️ SIGN & SAVE LOCAL DOCUMENT",
-                state=tk.NORMAL if self.signature_areas and self.input_pdf_path else tk.DISABLED
-            )
-        if self.drawing_mode:
-            self.toggle_draw_mode()
-        self.lbl_status.config(text="Exited Bulk Mode. Ready for single document signing.", foreground="#1E3A8A")
-        self.render_page()
-
-    def start_bulk_signing(self):
-        if not self.signature_areas:
-            return messagebox.showwarning("Signature Area Missing", "Please draw a signature box on the document first.\nClick and drag with your mouse.", parent=self.root)
-
-        mode = self.cert_source_var.get()
-        if mode == "pfx":
-            pfx_path = self.pfx_path_var.get().strip()
-            pfx_pass = self.pfx_pass_var.get()
-            if not pfx_path or not os.path.exists(pfx_path):
-                return messagebox.showerror("PFX Certificate Missing", "Please select a valid .pfx / .p12 certificate file on the left panel.", parent=self.root)
-            if not self.verify_pfx_certificate(silent=True):
-                return messagebox.showerror("PFX Password Missing", "Please enter the password for your .pfx certificate on the left panel.", parent=self.root)
-        else:
-            driver_path = DRIVER_MAP.get(self.driver_var.get())
-            if not driver_path or not os.path.exists(driver_path):
-                return messagebox.showerror("Driver Missing", "Could not find the hardware token driver.\nPlease ensure your Token software is installed.", parent=self.root)
-            if not self.loaded_certs:
-                return messagebox.showerror("Certificates Not Loaded", "Please click 'Load Certificates' and select your certificate on the left panel first.", parent=self.root)
-            idx = self.cert_combo.current()
-            if idx < 0:
-                return messagebox.showerror("Certificate Not Selected", "Please select a certificate from the dropdown on the left panel.", parent=self.root)
-            pin = self.pin_var.get()
-            if not pin:
-                return messagebox.showerror("Token PIN Missing", "Please enter your hardware token PIN on the left panel.", parent=self.root)
-
-        in_dir = self.bulk_in_dir
-        out_dir = self.bulk_out_dir
-        pdf_files = list(self.bulk_pdf_files)
-        selected_area = dict(self.signature_areas[0])
-
-        if not in_dir or not os.path.isdir(in_dir):
-            return messagebox.showerror("Folder Error", "Input folder does not exist.", parent=self.root)
-        if not pdf_files:
-            return messagebox.showerror("Folder Error", "No PDF files found to sign.", parent=self.root)
-
-        os.makedirs(out_dir, exist_ok=True)
-        BulkProgressDialog(self.root, self, in_dir, out_dir, pdf_files, selected_area)
-
-    def start_signing(self):
-        if LicenseManager.check_expiration_local() == "expired":
-            messagebox.showerror("License Expired", "Your software license has expired!\n\nPlease contact 7016797720 to renew.")
-            self._show_activation_screen()
-            return
-
-        if self.bulk_mode:
-            return self.start_bulk_signing()
-
-        if not self.input_pdf_path: return messagebox.showerror("Error", "Please open a PDF.")
-        if self.all_pages_var.get():
-            self._apply_area_to_all_pages_memory()
-        if not self.signature_areas: return messagebox.showwarning("Warning", "Draw a signature box on the document.")
-
-        mode = self.cert_source_var.get()
-        if mode == "pfx":
-            pfx_path = self.pfx_path_var.get().strip()
-            pfx_pass = self.pfx_pass_var.get()
-            if not pfx_path or not os.path.exists(pfx_path):
-                return messagebox.showerror("Error", "Please select a valid .p12/.pfx certificate file.", parent=self.root)
-            if not self.verify_pfx_certificate(silent=True):
-                return messagebox.showerror("Password Required", "Please enter the correct password for the .p12/.pfx file.", parent=self.root)
-
-            out_path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
-            if not out_path: return
-
-            self.lbl_status.config(text="Signing with .p12/.pfx certificate...", foreground="blue")
-            self.btn_sign.config(state=tk.DISABLED)
-
-            thread = threading.Thread(
-                target=self._signing_worker_pfx,
-                args=(self.input_pdf_path, out_path, pfx_path, pfx_pass, list(self.signature_areas))
-            )
-            thread.start()
-        else:
-            pin = self.pin_var.get()
-            if not pin: return messagebox.showerror("Error", "Enter Token PIN.")
-            idx = self.cert_combo.current()
-            if idx < 0: return messagebox.showerror("Error", "Select a certificate.")
-
-            out_path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
-            if not out_path: return
-
-            serial_number = self.loaded_certs[idx]['alias']
-            driver_path = DRIVER_MAP.get(self.driver_var.get())
-            self.lbl_status.config(text="Signing with USB Token...", foreground="blue")
-            self.btn_sign.config(state=tk.DISABLED)
-
-            thread = threading.Thread(
-                target=self._signing_worker_token,
-                args=(self.input_pdf_path, out_path, pin, serial_number, driver_path, list(self.signature_areas))
-            )
-            thread.start()
-
-    def _signing_worker_pfx(self, in_path, out_path, pfx_path, pfx_pass, areas):
-        try:
-            with open(in_path, 'rb') as f: pdf_data = f.read()
-            signer, cert_parsed = load_pfx_signer_and_cert(pfx_path, pfx_pass)
-            try: tst_client = HTTPTimeStamper(TSA_URL)
-            except Exception: tst_client = None
-
-            signed_bytes = sign_pdf_stream(pdf_data, areas, signer, cert_parsed, tst_client)
-            with open(out_path, 'wb') as f_out: f_out.write(signed_bytes)
-
-            validation_symbol, validation_msg = self._validate_output(out_path)
-            self.root.after(0, lambda: self.lbl_status.config(text=f"Successfully Signed with PFX! {validation_symbol}", foreground="green"))
-            self.root.after(0, lambda: messagebox.showinfo("Validation Status", f"File saved to:\n{out_path}\n\nLocal Pre-Check:\n{validation_symbol} {validation_msg}"))
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"LOCAL PFX SIGNING ERROR: {error_msg}\n{traceback.format_exc()}")
-            self.root.after(0, lambda: self.lbl_status.config(text="Signing Failed. ❌", foreground="red"))
-            self.root.after(0, lambda msg=error_msg: messagebox.showerror("Signing Error", msg))
-        finally:
-            self.root.after(0, lambda: self.btn_sign.config(state=tk.NORMAL))
-
-    def _signing_worker_token(self, in_path, out_path, pin, serial_number, driver_path, areas):
-        try:
-            with open(in_path, 'rb') as f: pdf_data = f.read()
-            lib = pkcs11.lib(driver_path)
-            token = None
-            for slot in lib.get_slots(token_present=True):
-                try: token = slot.get_token(); break
-                except Exception: continue
-
-            if not token: raise ValueError("Hardware Token not found. Ensure USB token is plugged in.")
-
-            with token.open(user_pin=pin) as session:
-                cert_id, cert_parsed = None, None
-                for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
-                    c = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
-                    if str(c.serial_number) == str(serial_number):
-                        cert_id, cert_parsed = obj[pkcs11.Attribute.ID], c
-                        break
-
-                if not cert_id: raise ValueError("Certificate not found on token. Check PIN.")
-                signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
-
-                try: tst_client = HTTPTimeStamper(TSA_URL)
-                except Exception: tst_client = None
-
-                signed_bytes = sign_pdf_stream(pdf_data, areas, signer, cert_parsed, tst_client)
-                with open(out_path, 'wb') as f_out: f_out.write(signed_bytes)
-
-            validation_symbol, validation_msg = self._validate_output(out_path)
-            self.root.after(0, lambda: self.lbl_status.config(text=f"Successfully Signed with Token! {validation_symbol}", foreground="green"))
-            self.root.after(0, lambda: messagebox.showinfo("Validation Status", f"File saved to:\n{out_path}\n\nLocal Pre-Check:\n{validation_symbol} {validation_msg}"))
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"LOCAL TOKEN SIGNING ERROR: {error_msg}\n{traceback.format_exc()}")
-            self.root.after(0, lambda: self.lbl_status.config(text="Signing Failed. ❌", foreground="red"))
-            self.root.after(0, lambda msg=error_msg: messagebox.showerror("Signing Error", msg))
-        finally:
-            self.root.after(0, lambda: self.btn_sign.config(state=tk.NORMAL))
-
-    def _validate_output(self, out_path):
-        try:
-            with open(out_path, 'rb') as doc_to_verify:
-                reader = PdfFileReader(doc_to_verify)
-                if reader.embedded_signatures:
-                    sig_obj = reader.embedded_signatures[-1]
-                    status = validate_pdf_signature(sig_obj)
-                    if status.intact:
-                        return "🟢", "Cryptographically Valid & Intact"
+                    base_name = Path(pdf_path).stem
+                    if self.sign_output_mode.get() == "folder" and self.sign_output_folder.get():
+                        out_dir = self.sign_output_folder.get()
                     else:
-                        return "❌", "Signature Invalid or File Corrupted"
-                else:
-                    return "❌", "No signature found in output file."
-        except Exception as val_e:
-            logger.warning(f"Local validation error: {val_e}")
-            return "❓", f"Validation Note: {str(val_e)}"
+                        out_dir = os.path.dirname(pdf_path)
+                    os.makedirs(out_dir, exist_ok=True)
+                    last_out_dir = out_dir
+                    out_path = os.path.join(out_dir, f"{base_name}_signed.pdf")
+
+                    reader = PdfReader(io.BytesIO(pdf_bytes))
+                    total_pages = len(reader.pages)
+                    page_mode = self.sign_page_mode.get()
+
+                    areas = []
+                    if not self.chk_visible_sig.get():
+                        areas = [{'page': 0, 'x': 0, 'y': 0, 'width': 0, 'height': 0, 'opts': area_opts}]
+                    elif page_mode == "all":
+                        for pno in range(total_pages):
+                            a = self.sign_selected_area.copy()
+                            a['page'] = pno
+                            a['opts'] = area_opts
+                            areas.append(a)
+                    elif page_mode == "first":
+                        a = self.sign_selected_area.copy()
+                        a['page'] = 0
+                        a['opts'] = area_opts
+                        areas.append(a)
+                    elif page_mode == "last":
+                        a = self.sign_selected_area.copy()
+                        a['page'] = max(0, total_pages - 1)
+                        a['opts'] = area_opts
+                        areas.append(a)
+                    elif page_mode == "specific":
+                        try: pno = int(self.sign_page_num_var.get()) - 1
+                        except Exception: pno = 0
+                        a = self.sign_selected_area.copy()
+                        a['page'] = max(0, min(total_pages - 1, pno))
+                        a['opts'] = area_opts
+                        areas.append(a)
+                    else:
+                        a = self.sign_selected_area.copy()
+                        a['opts'] = area_opts
+                        areas.append(a)
+
+                    signed_bytes = sign_pdf_stream(pdf_bytes, areas, signer, cert_parsed, tst_client=tst_client, protect_opts=protect_opts)
+                    with open(out_path, 'wb') as out_f:
+                        out_f.write(signed_bytes)
+                    success_count += 1
+                except Exception as e:
+                    logger.error(f"Error signing {pdf_path}: {e}")
+                    err_count += 1
+
+                self.root.after(0, lambda i=idx: self.sign_progress.config(value=i+1))
+
+            def _finish():
+                self.btn_sign_docs.config(state=tk.NORMAL, text="✍️ SIGN DOCUMENTS")
+                msg = f"Signing Complete!\n\nSuccessfully signed: {success_count} PDF(s)"
+                if err_count: msg += f"\nFailed: {err_count} PDF(s)"
+                self.lbl_sign_status.config(text=f"✓ Complete: {success_count} signed successfully.", foreground="#047857")
+                messagebox.showinfo("Signing Complete", msg)
+                if last_out_dir and os.path.exists(last_out_dir):
+                    self.last_output_dir = last_out_dir
+
+            self.root.after(0, _finish)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def open_output_folder(self):
+        folder = getattr(self, 'last_output_dir', None)
+        if not folder or not os.path.exists(folder):
+            if self.sign_output_folder.get() and os.path.exists(self.sign_output_folder.get()):
+                folder = self.sign_output_folder.get()
+            elif self.sign_pdf_files and os.path.exists(os.path.dirname(self.sign_pdf_files[0])):
+                folder = os.path.dirname(self.sign_pdf_files[0])
+            else:
+                folder = os.getcwd()
+
+        try:
+            if CURRENT_OS == 'Windows':
+                os.startfile(folder)
+            elif CURRENT_OS == 'Darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder: {e}")
+
+    # =========================================================================
+    # TAB 2 OPERATIONS (Image Stamp)
+    # =========================================================================
+    def stamp_add_files(self):
+        paths = filedialog.askopenfilenames(title="Select PDF Files to Stamp", filetypes=[("PDF", "*.pdf")])
+        if paths:
+            for p in paths:
+                if p not in self.stamp_pdf_files:
+                    self.stamp_pdf_files.append(p)
+                    self.stamp_listbox.insert(tk.END, os.path.basename(p))
+
+    def stamp_add_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder Containing PDFs")
+        if folder:
+            for f in os.listdir(folder):
+                if f.lower().endswith(".pdf"):
+                    full = os.path.join(folder, f)
+                    if full not in self.stamp_pdf_files:
+                        self.stamp_pdf_files.append(full)
+                        self.stamp_listbox.insert(tk.END, f)
+
+    def stamp_remove(self):
+        for idx in reversed(list(self.stamp_listbox.curselection())):
+            self.stamp_listbox.delete(idx)
+            del self.stamp_pdf_files[idx]
+
+    def stamp_clear(self):
+        self.stamp_listbox.delete(0, tk.END)
+        self.stamp_pdf_files.clear()
+
+    def browse_stamp_image(self):
+        f = filedialog.askopenfilename(title="Select Stamp Image", filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp")])
+        if f: self.stamp_img_path.set(f)
+
+    def stamp_browse_out_folder(self):
+        f = filedialog.askdirectory(title="Select Output Folder")
+        if f:
+            self.stamp_out_dir.set(f)
+            self.stamp_out_mode.set("folder")
+
+    def open_stamp_position_picker(self):
+        pdf_path = self.stamp_pdf_files[0] if self.stamp_pdf_files else None
+        if not pdf_path or not os.path.exists(pdf_path):
+            pdf_path = filedialog.askopenfilename(title="Select Template PDF", filetypes=[("PDF", "*.pdf")])
+        if not pdf_path: return
+
+        def _on_area(area):
+            self.stamp_custom_rect = (area['x'], area['y'], area['width'], area['height'])
+            self.stamp_pos_mode.set("custom")
+            self.lbl_stamp_status.config(text=f"✓ Custom position chosen on Page {int(area.get('page', 0))+1}")
+
+        SignatureAreaPickerWindow(self.root, pdf_path, _on_area, title="Choose Image Stamp Position on Page")
+
+    def start_image_stamping(self):
+        if not self.stamp_pdf_files:
+            messagebox.showerror("Error", "Please add at least one PDF file to stamp.")
+            return
+        img_path = self.stamp_img_path.get().strip()
+        if not img_path or not os.path.exists(img_path):
+            messagebox.showerror("Error", "Please select a valid stamp image file.")
+            return
+
+        pos_mode = self.stamp_pos_mode.get()
+        p_scope = self.stamp_page_scope.get()
+        try: target_p = int(self.stamp_page_num.get())
+        except Exception: target_p = 1
+        try: sw = float(self.stamp_width_var.get()); sh = float(self.stamp_height_var.get())
+        except Exception: sw = 150.0; sh = 60.0
+
+        def _worker():
+            success = 0
+            for p in self.stamp_pdf_files:
+                try:
+                    stem = Path(p).stem
+                    out_d = self.stamp_out_dir.get() if (self.stamp_out_mode.get() == "folder" and self.stamp_out_dir.get()) else os.path.dirname(p)
+                    out_path = os.path.join(out_d, f"{stem}_stamped.pdf")
+                    PdfStampManager.apply_stamp(p, out_path, img_path, position_mode=pos_mode, custom_rect=self.stamp_custom_rect, page_selection=p_scope, target_page=target_p, stamp_size=(sw, sh))
+                    success += 1
+                except Exception as e:
+                    logger.error(f"Error stamping {p}: {e}")
+
+            self.root.after(0, lambda: self.lbl_stamp_status.config(text=f"✓ Stamping Complete! Stamped {success} file(s)."))
+            self.root.after(0, lambda: messagebox.showinfo("Complete", f"Successfully applied stamp to {success} PDF(s)."))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # =========================================================================
+    # TAB 3 OPERATIONS (Compress)
+    # =========================================================================
+    def compress_add_files(self):
+        paths = filedialog.askopenfilenames(title="Select PDFs to Compress", filetypes=[("PDF", "*.pdf")])
+        if paths:
+            for p in paths:
+                if p not in self.compress_pdf_files:
+                    self.compress_pdf_files.append(p)
+                    self.compress_listbox.insert(tk.END, os.path.basename(p))
+
+    def compress_add_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder")
+        if folder:
+            for f in os.listdir(folder):
+                if f.lower().endswith(".pdf"):
+                    full = os.path.join(folder, f)
+                    if full not in self.compress_pdf_files:
+                        self.compress_pdf_files.append(full)
+                        self.compress_listbox.insert(tk.END, f)
+
+    def compress_remove(self):
+        for idx in reversed(list(self.compress_listbox.curselection())):
+            self.compress_listbox.delete(idx)
+            del self.compress_pdf_files[idx]
+
+    def compress_clear(self):
+        self.compress_listbox.delete(0, tk.END)
+        self.compress_pdf_files.clear()
+
+    def start_compressing(self):
+        if not self.compress_pdf_files:
+            messagebox.showerror("Error", "Please add at least one PDF file to compress.")
+            return
+
+        level = self.compress_level_var.get()
+        color = self.compress_color_var.get()
+        for item in self.tree_compress.get_children():
+            self.tree_compress.delete(item)
+
+        def _worker():
+            total_saved = 0
+            for p in self.compress_pdf_files:
+                try:
+                    stem = Path(p).stem
+                    out_d = self.compress_out_dir.get() if (self.compress_out_mode.get() == "folder" and self.compress_out_dir.get()) else os.path.dirname(p)
+                    out_path = os.path.join(out_d, f"{stem}_compressed.pdf")
+                    stats = PdfCompressor.compress_pdf(p, out_path, level=level, color_mode=color)
+                    total_saved += stats["saved_bytes"]
+                    orig_kb = f"{stats['orig_size'] / 1024:.1f} KB"
+                    new_kb = f"{stats['new_size'] / 1024:.1f} KB"
+                    saved_kb = f"{stats['saved_bytes'] / 1024:.1f} KB"
+                    pct_str = f"{stats['saved_pct']:.1f}%"
+                    self.root.after(0, lambda fn=os.path.basename(p), o=orig_kb, n=new_kb, s=saved_kb, pct=pct_str: self.tree_compress.insert("", tk.END, values=(fn, o, n, s, pct)))
+                except Exception as e:
+                    logger.error(f"Compress error on {p}: {e}")
+
+            self.root.after(0, lambda: self.lbl_compress_status.config(text=f"✓ Compression Complete! Total space saved: {total_saved / (1024*1024):.2f} MB"))
+            self.root.after(0, lambda: messagebox.showinfo("Complete", f"Compressed all PDFs!\nTotal Space Saved: {total_saved / (1024*1024):.2f} MB"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # =========================================================================
+    # TAB 4 OPERATIONS (Merge)
+    # =========================================================================
+    def merge_add_files(self):
+        paths = filedialog.askopenfilenames(title="Select PDFs to Merge", filetypes=[("PDF", "*.pdf")])
+        if paths:
+            for p in paths:
+                self.merge_pdf_items.append({'path': p, 'name': os.path.basename(p), 'range': 'all'})
+            self._refresh_merge_tree()
+
+    def merge_add_folder(self):
+        folder = filedialog.askdirectory(title="Select Folder")
+        if folder:
+            for f in sorted(os.listdir(folder)):
+                if f.lower().endswith(".pdf"):
+                    full = os.path.join(folder, f)
+                    self.merge_pdf_items.append({'path': full, 'name': f, 'range': 'all'})
+            self._refresh_merge_tree()
+
+    def _refresh_merge_tree(self):
+        for item in self.tree_merge.get_children():
+            self.tree_merge.delete(item)
+        for idx, item in enumerate(self.merge_pdf_items):
+            self.tree_merge.insert("", tk.END, values=(idx + 1, item['name'], item['range'], item['path']))
+
+    def merge_move_up(self):
+        sel = self.tree_merge.selection()
+        if sel:
+            idx = self.tree_merge.index(sel[0])
+            if idx > 0:
+                self.merge_pdf_items[idx], self.merge_pdf_items[idx-1] = self.merge_pdf_items[idx-1], self.merge_pdf_items[idx]
+                self._refresh_merge_tree()
+                self.tree_merge.selection_set(self.tree_merge.get_children()[idx-1])
+
+    def merge_move_down(self):
+        sel = self.tree_merge.selection()
+        if sel:
+            idx = self.tree_merge.index(sel[0])
+            if idx < len(self.merge_pdf_items) - 1:
+                self.merge_pdf_items[idx], self.merge_pdf_items[idx+1] = self.merge_pdf_items[idx+1], self.merge_pdf_items[idx]
+                self._refresh_merge_tree()
+                self.tree_merge.selection_set(self.tree_merge.get_children()[idx+1])
+
+    def merge_remove(self):
+        sel = self.tree_merge.selection()
+        if sel:
+            idx = self.tree_merge.index(sel[0])
+            del self.merge_pdf_items[idx]
+            self._refresh_merge_tree()
+
+    def merge_clear(self):
+        self.merge_pdf_items.clear()
+        self._refresh_merge_tree()
+
+    def _on_merge_select(self, event):
+        sel = self.tree_merge.selection()
+        if sel:
+            idx = self.tree_merge.index(sel[0])
+            self.entry_merge_range.delete(0, tk.END)
+            self.entry_merge_range.insert(0, self.merge_pdf_items[idx]['range'])
+
+    def merge_set_range(self):
+        sel = self.tree_merge.selection()
+        if sel:
+            idx = self.tree_merge.index(sel[0])
+            new_r = self.entry_merge_range.get().strip() or "all"
+            self.merge_pdf_items[idx]['range'] = new_r
+            self._refresh_merge_tree()
+
+    def merge_browse_out(self):
+        f = filedialog.asksaveasfilename(title="Save Merged PDF As", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if f: self.merge_out_path.set(f)
+
+    def start_merging(self):
+        if len(self.merge_pdf_items) < 2:
+            messagebox.showerror("Error", "Please add at least 2 PDF files to merge.")
+            return
+        out_p = self.merge_out_path.get().strip()
+        if not out_p:
+            out_p = filedialog.asksaveasfilename(title="Save Merged PDF As", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+            if not out_p: return
+            self.merge_out_path.set(out_p)
+
+        file_configs = [(item['path'], item['range']) for item in self.merge_pdf_items]
+        try:
+            success = PdfMerger.merge_pdfs(file_configs, out_p)
+            if success:
+                self.lbl_merge_status.config(text=f"✓ Merged {len(file_configs)} documents successfully into: {os.path.basename(out_p)}")
+                messagebox.showinfo("Success", f"Merged successfully into:\n{out_p}")
+            else:
+                messagebox.showerror("Error", "Could not complete PDF merge.")
+        except Exception as e:
+            messagebox.showerror("Merge Error", str(e))
+
+    # =========================================================================
+    # TAB 5 OPERATIONS (Verify)
+    # =========================================================================
+    def verify_browse_file(self):
+        f = filedialog.askopenfilename(title="Select Signed PDF to Verify", filetypes=[("PDF", "*.pdf")])
+        if f:
+            self.verify_pdf_path.set(f)
+            self.start_verification()
+
+    def start_verification(self):
+        p = self.verify_pdf_path.get().strip()
+        if not p or not os.path.exists(p):
+            messagebox.showerror("Error", "Please select a valid PDF file to verify.")
+            return
+
+        res = PdfVerifier.verify_pdf(p)
+        self.txt_verify_report.delete("1.0", tk.END)
+
+        if not res.get("has_signatures"):
+            self.lbl_verify_banner.config(text="⚠️ No Digital Signatures Found in this PDF.", fg="#D97706", bg="#FEF3C7")
+            self.txt_verify_report.insert(tk.END, f"File: {p}\nStatus: Document contains no cryptographic signature fields.\n")
+            return
+
+        all_ok = res.get("all_valid")
+        if all_ok:
+            self.lbl_verify_banner.config(text="✅ All Digital Signatures are VALID & Document is INTACT", fg="#047857", bg="#ECFDF5")
+        else:
+            self.lbl_verify_banner.config(text="❌ Signature Invalid or Document Has Been Modified", fg="#DC2626", bg="#FEF2F2")
+
+        report_lines = [
+            f"FILE: {p}",
+            f"VERIFICATION SUMMARY: {res.get('message')}",
+            "=" * 60,
+        ]
+        for idx, sig in enumerate(res.get("signatures", [])):
+            report_lines.extend([
+                f"\n[SIGNATURE #{idx+1}]: {sig['field_name']}",
+                f"  • Common Name (CN): {sig['signer_cn']}",
+                f"  • Issuer: {sig['issuer_cn']}",
+                f"  • Status: {'VALID & INTACT' if (sig['valid'] and sig['intact']) else 'INVALID / MODIFIED'}",
+                f"  • Serial Number: {sig['serial']}",
+                f"  • Validity Date: {sig['expiry']}",
+                f"  • Qualified Timestamp (TSA): {sig['tsa_time']}",
+                f"  • Assessment: {sig['summary']}",
+            ])
+        self.txt_verify_report.insert(tk.END, "\n".join(report_lines))
+
+    # =========================================================================
+    # TAB 6 OPERATIONS (Tools)
+    # =========================================================================
+    def _browse_single_file(self, target_var):
+        f = filedialog.askopenfilename(title="Select PDF", filetypes=[("PDF", "*.pdf")])
+        if f: target_var.set(f)
+
+    def _browse_single_folder(self, target_var):
+        f = filedialog.askdirectory(title="Select Destination Folder")
+        if f: target_var.set(f)
+
+    def exec_split_pdf(self):
+        p = self.tool_split_pdf.get().strip()
+        out_d = self.tool_split_out_dir.get().strip() or os.path.dirname(p)
+        if not p or not os.path.exists(p):
+            messagebox.showerror("Error", "Please select a valid PDF to split.")
+            return
+        mode = self.tool_split_mode.get()
+        ranges = self.tool_split_ranges.get()
+        try:
+            created = PdfToolsManager.split_pdf(p, out_d, mode=mode, ranges=ranges)
+            self.lbl_tool_split_status.config(text=f"✓ Split into {len(created)} separate PDF file(s).")
+            messagebox.showinfo("Split Complete", f"Successfully created {len(created)} file(s) in:\n{out_d}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def exec_rotate_pdf(self):
+        p = self.tool_rot_pdf.get().strip()
+        if not p or not os.path.exists(p):
+            messagebox.showerror("Error", "Please select a valid PDF to rotate.")
+            return
+        stem = Path(p).stem
+        out_p = os.path.join(os.path.dirname(p), f"{stem}_rotated.pdf")
+        try:
+            PdfToolsManager.rotate_pdf(p, out_p, angle=self.tool_rot_angle.get(), page_selection=self.tool_rot_scope.get(), specific_pages=self.tool_rot_spec.get())
+            self.lbl_tool_rot_status.config(text=f"✓ Rotated and saved: {os.path.basename(out_p)}")
+            messagebox.showinfo("Rotate Complete", f"Saved rotated document to:\n{out_p}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def exec_extract_pages(self):
+        p = self.tool_ext_pdf.get().strip()
+        pages = self.tool_ext_pages.get().strip()
+        if not p or not os.path.exists(p) or not pages:
+            messagebox.showerror("Error", "Please select a PDF and specify pages to extract.")
+            return
+        stem = Path(p).stem
+        out_p = os.path.join(os.path.dirname(p), f"{stem}_extracted.pdf")
+        try:
+            PdfToolsManager.extract_pages(p, out_p, pages)
+            self.lbl_tool_ext_status.config(text=f"✓ Extracted pages ({pages}) to: {os.path.basename(out_p)}")
+            messagebox.showinfo("Extract Complete", f"Saved extracted pages to:\n{out_p}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def exec_delete_pages(self):
+        p = self.tool_del_pdf.get().strip()
+        pages = self.tool_del_pages.get().strip()
+        if not p or not os.path.exists(p) or not pages:
+            messagebox.showerror("Error", "Please select a PDF and specify pages to delete.")
+            return
+        stem = Path(p).stem
+        out_p = os.path.join(os.path.dirname(p), f"{stem}_deleted_pages.pdf")
+        try:
+            PdfToolsManager.delete_pages(p, out_p, pages)
+            self.lbl_tool_del_status.config(text=f"✓ Deleted pages ({pages}) and saved: {os.path.basename(out_p)}")
+            messagebox.showinfo("Delete Complete", f"Saved cleaned PDF to:\n{out_p}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def exec_protect_pdf(self):
+        p = self.tool_prot_pdf.get().strip()
+        if not p or not os.path.exists(p):
+            messagebox.showerror("Error", "Please select a PDF to protect.")
+            return
+        u_pw = self.tool_prot_open.get().strip()
+        o_pw = self.tool_prot_perm.get().strip()
+        if not u_pw and not o_pw:
+            messagebox.showerror("Error", "Please enter at least one password.")
+            return
+        stem = Path(p).stem
+        out_p = os.path.join(os.path.dirname(p), f"{stem}_protected.pdf")
+        try:
+            PdfToolsManager.protect_pdf(p, out_p, u_pw, o_pw, allow_print=self.tool_prot_print.get(), allow_copy=self.tool_prot_copy.get(), allow_edit=self.tool_prot_edit.get())
+            self.lbl_tool_prot_status.config(text=f"✓ Protected with 256-bit AES encryption: {os.path.basename(out_p)}")
+            messagebox.showinfo("Protection Complete", f"Encrypted and protected with AES-256:\n{out_p}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def exec_unlock_pdf(self):
+        p = self.tool_unl_pdf.get().strip()
+        pw = self.tool_unl_pw.get()
+        if not p or not os.path.exists(p):
+            messagebox.showerror("Error", "Please select a protected PDF.")
+            return
+        stem = Path(p).stem
+        out_p = os.path.join(os.path.dirname(p), f"{stem}_unlocked.pdf")
+        try:
+            PdfToolsManager.unlock_pdf(p, out_p, pw)
+            self.lbl_tool_unl_status.config(text=f"✓ Password removed successfully: {os.path.basename(out_p)}")
+            messagebox.showinfo("Unlock Complete", f"Saved decrypted PDF to:\n{out_p}")
+        except Exception as e:
+            messagebox.showerror("Unlock Error", str(e))
+
+    # =========================================================================
+    # TAB 7 OPERATIONS (OCR & Edit)
+    # =========================================================================
+    def exec_ocr_extract(self):
+        p = self.ocr_pdf_path.get().strip()
+        if not p or not os.path.exists(p):
+            messagebox.showerror("Error", "Please select a PDF for OCR & Text extraction.")
+            return
+        scope = self.ocr_page_scope.get().strip() or "all"
+        try:
+            content = PdfOcrEditManager.extract_text_and_ocr(p, page_range=scope)
+            self.txt_ocr_preview.delete("1.0", tk.END)
+            self.txt_ocr_preview.insert(tk.END, content)
+            messagebox.showinfo("OCR Complete", f"Successfully extracted text from document ({scope}).")
+        except Exception as e:
+            messagebox.showerror("OCR Error", str(e))
+
+    def save_ocr_to_file(self):
+        content = self.txt_ocr_preview.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showinfo("Note", "No text content available to save.")
+            return
+        f = filedialog.asksaveasfilename(title="Save Extracted Text As", defaultextension=".txt", filetypes=[("Text Files", "*.txt")])
+        if f:
+            with open(f, "w", encoding="utf-8") as out_f:
+                out_f.write(content)
+            messagebox.showinfo("Saved", f"Text saved to:\n{f}")
+
+    def exec_search_and_redact(self):
+        p = self.redact_pdf_path.get().strip()
+        term = self.redact_term_var.get().strip()
+        if not p or not os.path.exists(p) or not term:
+            messagebox.showerror("Error", "Please select a PDF and enter search term to redact.")
+            return
+        rep_text = self.redact_replace_var.get() if self.redact_mode_var.get() == "replace" else ""
+        stem = Path(p).stem
+        out_p = os.path.join(os.path.dirname(p), f"{stem}_redacted.pdf")
+        try:
+            count = PdfOcrEditManager.search_and_redact(p, out_p, term, replace_text=rep_text)
+            self.lbl_redact_status.config(text=f"✓ Redacted {count} occurrence(s) of '{term}'")
+            messagebox.showinfo("Redaction Complete", f"Permanently redacted {count} occurrence(s).\nSaved to:\n{out_p}")
+        except Exception as e:
+            messagebox.showerror("Redaction Error", str(e))
+
+    def exec_add_watermark(self):
+        p = self.wm_pdf_path.get().strip()
+        text = self.wm_text_var.get().strip()
+        if not p or not os.path.exists(p) or not text:
+            messagebox.showerror("Error", "Please select a PDF and enter watermark text.")
+            return
+        stem = Path(p).stem
+        out_p = os.path.join(os.path.dirname(p), f"{stem}_watermarked.pdf")
+        try:
+            PdfOcrEditManager.add_watermark(p, out_p, watermark_text=text, angle=self.wm_angle_var.get())
+            self.lbl_wm_status.config(text=f"✓ Watermark '{text}' applied successfully.")
+            messagebox.showinfo("Watermark Complete", f"Applied watermark successfully:\n{out_p}")
+        except Exception as e:
+            messagebox.showerror("Watermark Error", str(e))
+
+    # =========================================================================
+    # EXTERNAL SHORTCUTS & HELPERS
+    # =========================================================================
+    def open_buy_dsc(self):
+        url = "https://pay.a-b-infotech.in/license.php"
+        self._open_url_in_app_mode(url, hide_window=False)
+
+    def open_whatsapp(self):
+        webbrowser.open("https://wa.me/919752318084")
 
     def reload_drivers(self, select_driver=None):
         global DRIVER_MAP
         DRIVER_MAP = get_platform_drivers()
         all_keys = list(DRIVER_MAP.keys())
-        self.driver_combo['values'] = all_keys
+        self.token_driver_combo['values'] = all_keys
         if select_driver and select_driver in all_keys:
             self.driver_var.set(select_driver)
         elif all_keys:
-            self.driver_combo.current(0)
+            self.token_driver_combo.current(0)
 
     def open_settings_dialog(self, initial_tab=None):
         SettingsDialog(self.root, self, initial_tab=initial_tab)
 
     def open_batch_dialog(self):
         BatchFolderDialog(self.root, self)
+
+    def open_pdf(self):
+        self.notebook.select(self.tab_sign)
+        self.sign_add_files()
+
+
 
 # ==========================================
 # 4.5. BULK SIGN FOLDER & PROGRESS DIALOGS
