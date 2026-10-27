@@ -185,8 +185,9 @@ class LicenseManager:
             return False
 
     @staticmethod
-    def save_license(key, expiredate="never"):
-        data_to_encode = f"{key}|||{expiredate}"
+    def save_license(key, expiredate="never", tier="pro", ocr_enabled=1, edit_enabled=1):
+        tier_clean = str(tier).lower().strip() if tier else "pro"
+        data_to_encode = f"{key}|||{expiredate}|||{tier_clean}|||{int(bool(int(ocr_enabled)))}|||{int(bool(int(edit_enabled)))}"
         encoded_data = base64.b64encode(data_to_encode.encode())
 
         icon_binary = b""
@@ -220,9 +221,16 @@ class LicenseManager:
                 pass
 
     @staticmethod
-    def get_license_data():
+    def get_license_info():
+        default_info = {
+            "key": None,
+            "expiredate": "never",
+            "tier": "pro",
+            "ocr_enabled": True,
+            "edit_enabled": True
+        }
         if not LicenseManager.is_activated():
-            return None, None
+            return default_info
         try:
             with open(LicenseManager.LICENSE_FILE, "rb") as f:
                 data = f.read()
@@ -231,19 +239,53 @@ class LicenseManager:
                 if len(parts) > 1:
                     encoded_data = parts[-1]
                     decoded_str = base64.b64decode(encoded_data).decode('utf-8')
-                    if "|||" in decoded_str:
-                        k, exp = decoded_str.split("|||", 1)
-                        return k, exp
-                    else:
-                        return decoded_str, "never"
+                    chunks = decoded_str.split("|||")
+                    k = chunks[0] if len(chunks) > 0 else None
+                    exp = chunks[1] if len(chunks) > 1 else "never"
+                    tier = chunks[2] if len(chunks) > 2 else ("enterprise" if k == "ABI-MASTER-PASS" else "pro")
+                    ocr_val = int(chunks[3]) if len(chunks) > 3 and chunks[3].isdigit() else 1
+                    edit_val = int(chunks[4]) if len(chunks) > 4 and chunks[4].isdigit() else 1
+
+                    if k == "ABI-MASTER-PASS":
+                        tier = "enterprise"
+                        ocr_val = 1
+                        edit_val = 1
+
+                    return {
+                        "key": k,
+                        "expiredate": exp,
+                        "tier": tier.lower(),
+                        "ocr_enabled": bool(ocr_val),
+                        "edit_enabled": bool(edit_val)
+                    }
         except Exception as e:
-            logger.error(f"Failed to read license data: {e}")
-        return None, None
+            logger.error(f"Failed to read license info: {e}")
+        return default_info
+
+    @staticmethod
+    def get_license_data():
+        info = LicenseManager.get_license_info()
+        return info.get("key"), info.get("expiredate")
 
     @staticmethod
     def get_license_key():
         k, _ = LicenseManager.get_license_data()
         return k
+
+    @staticmethod
+    def is_ocr_enabled():
+        info = LicenseManager.get_license_info()
+        return info.get("ocr_enabled", True) and (info.get("tier", "pro").lower() in ["pro", "enterprise"])
+
+    @staticmethod
+    def is_edit_enabled():
+        info = LicenseManager.get_license_info()
+        return info.get("edit_enabled", True) and (info.get("tier", "pro").lower() in ["pro", "enterprise"])
+
+    @staticmethod
+    def get_tier_label():
+        info = LicenseManager.get_license_info()
+        return info.get("tier", "pro").capitalize()
 
     @staticmethod
     def check_expiration_local():
@@ -454,16 +496,21 @@ def activate_callback():
     key = request.args.get('key')
     expiredate = request.args.get('expiredate', 'never')
     message = request.args.get('message', 'Unknown Error')
+    tier = request.args.get('tier', 'pro')
+    ocr = request.args.get('ocr', '1')
+    edit = request.args.get('edit', '1')
 
-    close_script = "<script>setTimeout(function(){ window.opener = null; window.open('','_self'); window.close(); }, 1000);</script>"
+    close_script = "<script>setTimeout(function(){ window.opener = null; window.open('','_self'); window.close(); }, 1200);</script>"
 
     if status == 'valid' and key:
-        LicenseManager.save_license(key, expiredate)
+        LicenseManager.save_license(key, expiredate, tier=tier, ocr_enabled=ocr, edit_enabled=edit)
         LicenseManager.activation_error = None
+        tier_title = tier.upper()
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h1 style='color: #2ecc71;'>Activation Successful!</h1>
-            <p style='font-size: 18px;'>Your software is now unlocked.</p>
+            <p style='font-size: 18px; color: #1E3A8A;'><b>A B INFOTECH {tier_title} SUITE UNLOCKED</b></p>
+            <p style='font-size: 14px; color: #555;'>Expiry: {expiredate} | WhatsApp Support: +91 7016797720</p>
             {close_script}
         </body></html>
         """
@@ -473,6 +520,7 @@ def activate_callback():
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h1 style='color: #e74c3c;'>Activation Failed</h1>
             <p style='font-size: 18px; color: #333;'>{message}</p>
+            <p style='font-size: 14px; color: #555;'>Contact: +91 7016797720 | sales@a-b-infotech.in</p>
             {close_script}
         </body></html>
         """
@@ -481,24 +529,30 @@ def activate_callback():
 def sync_callback():
     status = request.args.get('status')
     key = LicenseManager.get_license_key()
+    tier = request.args.get('tier', 'pro')
+    ocr = request.args.get('ocr', '1')
+    edit = request.args.get('edit', '1')
     close_script = "<script>setTimeout(function(){ window.opener = null; window.open('','_self'); window.close(); }, 1000);</script>"
 
     if status in ['expired', 'inactive', 'invalid', 'suspended']:
         logger.warning(f"Browser Sync: License is {status}. Locking app.")
-        LicenseManager.save_license(key, "2000-01-01 00:00:00")
+        LicenseManager.save_license(key, "2000-01-01 00:00:00", tier=tier, ocr_enabled=0, edit_enabled=0)
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h2 style='color: #e74c3c;'>License Suspended or Expired</h2>
-            <p style='font-size: 18px;'>Your software has been locked.</p>
+            <p style='font-size: 18px;'>Your software has been locked. Please contact +91 7016797720 (sales@a-b-infotech.in) to renew.</p>
             {close_script}
         </body></html>
         """
     else:
-        logger.info("Browser Sync: License is active!")
+        logger.info(f"Browser Sync: License is active! Tier: {tier}")
+        if key:
+            _, exp = LicenseManager.get_license_data()
+            LicenseManager.save_license(key, exp, tier=tier, ocr_enabled=ocr, edit_enabled=edit)
         return f"""
         <html><body style='font-family: Arial; text-align: center; padding: 50px; background-color: #f4f4f9;'>
             <h2 style='color: #2ecc71;'>License Verified Online!</h2>
-            <p style='font-size: 18px;'>Your software is fully synced.</p>
+            <p style='font-size: 18px;'>Your software is fully synced ({tier.upper()} Suite).</p>
             {close_script}
         </body></html>
         """
@@ -2239,16 +2293,20 @@ class VisualPdfSignerApp:
         tk.Label(title_box, text="A B INFOTECH", font=get_sys_font(13, "bold"), fg="#FFFFFF", bg="#1E3A8A").pack(side=tk.LEFT)
         tk.Label(title_box, text="— PDF Sign & All-in-One Power Suite", font=get_sys_font(10), fg="#BFDBFE", bg="#1E3A8A").pack(side=tk.LEFT, padx=(6, 8))
 
-        lic_badge = tk.Label(title_box, text="v2.0 PRO SUITE", font=get_sys_font(8, "bold"), fg="#10B981", bg="#064E3B", padx=6, pady=2, relief=tk.SOLID, bd=1)
+        tier_lbl = LicenseManager.get_tier_label()
+        badge_fg = "#10B981" if tier_lbl in ["Pro", "Enterprise"] else "#F59E0B"
+        badge_bg = "#064E3B" if tier_lbl in ["Pro", "Enterprise"] else "#78350F"
+        lic_badge = tk.Label(title_box, text=f"v2.0 {tier_lbl.upper()} SUITE", font=get_sys_font(8, "bold"), fg=badge_fg, bg=badge_bg, padx=6, pady=2, relief=tk.SOLID, bd=1)
         lic_badge.pack(side=tk.LEFT)
 
         # Right Header Buttons
         btn_box = tk.Frame(header_bar, bg="#1E3A8A")
         btn_box.pack(side=tk.RIGHT, fill=tk.Y)
 
-        ttk.Button(btn_box, text="🛒 Buy DSC / License", style="BuyDSC.TButton", command=self.open_buy_dsc).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_box, text="💬 WhatsApp Support", style="Tool3D.TButton", command=self.open_whatsapp).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_box, text="⚙️ Drivers & Settings", style="Tool3D.TButton", command=self.open_settings_dialog).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_box, text="🛒 Buy DSC / License", style="BuyDSC.TButton", command=self.open_buy_dsc).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_box, text="🛠️ Token Drivers", style="Tool3D.TButton", command=self.show_driver_shortcuts_dialog).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_box, text="💬 WhatsApp: +91 7016797720", style="Tool3D.TButton", command=self.open_whatsapp).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_box, text="⚙️ Settings", style="Tool3D.TButton", command=self.open_settings_dialog).pack(side=tk.LEFT, padx=4)
 
         # ------------------------------------------
         # Main Notebook (8 Tabs matching Reference Application)
@@ -2370,6 +2428,7 @@ class VisualPdfSignerApp:
         pin_row.pack(fill=tk.X, pady=(2, 2))
         tk.Label(pin_row, text="Hardware Token PIN:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(side=tk.LEFT)
         ttk.Entry(pin_row, textvariable=self.pin_var, show="*", width=16).pack(side=tk.LEFT, padx=6)
+        ttk.Button(pin_row, text="🛠️ Driver Shortcuts", style="Tool3D.TButton", command=self.show_driver_shortcuts_dialog).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(pin_row, text="⚙️ Manage Drivers", style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")).pack(side=tk.RIGHT)
 
         # Sub-tab B: PFX / P12 file
@@ -2416,7 +2475,7 @@ class VisualPdfSignerApp:
         brand_bar = tk.Frame(card_sec2, bg="#F0F9FF", relief=tk.SOLID, bd=1, padx=8, pady=6)
         brand_bar.pack(fill=tk.X, pady=(6, 0))
         tk.Label(brand_bar, text="A B INFOTECH", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W)
-        tk.Label(brand_bar, text="Reliable, Secure & Perfect  |  WhatsApp: 9752318084  |  a-b-infotech.in", font=get_sys_font(7), fg="#0284C7", bg="#F0F9FF").pack(anchor=tk.W)
+        tk.Label(brand_bar, text="Reliable, Secure & Perfect  |  WhatsApp: +91 7016797720  |  Email: sales@a-b-infotech.in", font=get_sys_font(7), fg="#0284C7", bg="#F0F9FF").pack(anchor=tk.W)
 
         # RIGHT COLUMN: Section 3 (Signature details)
         card_sec3 = self._create_3d_card(right_col, pady=(0, 6))
@@ -2894,11 +2953,18 @@ class VisualPdfSignerApp:
         outer = tk.Frame(parent, bg="#F1F5F9")
         outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
-        is_lic = LicenseManager.is_activated()
-        lic_box = tk.Frame(outer, bg="#ECFDF5" if is_lic else "#FFFBEB", relief=tk.SOLID, bd=1, padx=10, pady=8)
+        # License Status Notice with Tier Verification
+        is_lic = LicenseManager.is_activated() and LicenseManager.check_expiration_local() == "active"
+        ocr_allowed = is_lic and LicenseManager.is_ocr_enabled()
+        tier_lbl = LicenseManager.get_tier_label()
+
+        lic_box = tk.Frame(outer, bg="#ECFDF5" if ocr_allowed else "#FFFBEB", relief=tk.SOLID, bd=1, padx=10, pady=8)
         lic_box.pack(fill=tk.X, pady=(0, 8))
-        if is_lic:
-            tk.Label(lic_box, text="⭐ Professional Suite Active: OCR Recognition, Text Redaction & Watermarking Unlocked", font=get_sys_font(9, "bold"), fg="#065F46", bg="#ECFDF5").pack(side=tk.LEFT)
+        if ocr_allowed:
+            tk.Label(lic_box, text=f"⭐ {tier_lbl.upper()} EDITION ACTIVE: Full PDF OCR Recognition, Search & Redact / Edit Unlocked", font=get_sys_font(9, "bold"), fg="#065F46", bg="#ECFDF5").pack(side=tk.LEFT)
+        elif is_lic:
+            tk.Label(lic_box, text=f"🔒 {tier_lbl.upper()} EDITION: PDF OCR & Text Editing requires Pro or Enterprise License upgrade.", font=get_sys_font(9, "bold"), fg="#92400E", bg="#FFFBEB").pack(side=tk.LEFT)
+            ttk.Button(lic_box, text="🚀 Upgrade to Pro (WhatsApp: +91 7016797720)", style="BuyDSC.TButton", command=self.open_whatsapp).pack(side=tk.RIGHT)
         else:
             tk.Label(lic_box, text="🔒 Professional Feature: Activate License to Unlock Full PDF OCR Recognition & Redaction", font=get_sys_font(9, "bold"), fg="#92400E", bg="#FFFBEB").pack(side=tk.LEFT)
             ttk.Button(lic_box, text="Activate License", style="BuyDSC.TButton", command=self._show_activation_screen).pack(side=tk.RIGHT)
@@ -2984,22 +3050,28 @@ class VisualPdfSignerApp:
         card2 = self._create_3d_card(outer, pady=(0, 10))
         tk.Label(card2, text="License & System Information", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
 
-        lic_data = LicenseManager.get_license_data() or {}
-        exp_date = lic_data.get("expiredate", "Unknown")
-        key_val = LicenseManager.get_license_key() or "Not Installed"
+        lic_info = LicenseManager.get_license_info()
+        exp_date = lic_info.get("expiredate", "Unknown")
+        key_val = lic_info.get("key") or "Not Installed"
         hw_id = LicenseManager.get_hardware_id()
+        tier_val = lic_info.get("tier", "pro").capitalize()
+        ocr_stat = "Unlocked (Pro/Enterprise)" if lic_info.get("ocr_enabled") else "Locked (Upgrade Required)"
 
         tk.Label(card2, text=f"• Machine / Hardware ID: {hw_id}", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
         tk.Label(card2, text=f"• License Key: {key_val}", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• License Edition / Variant: {tier_val} Edition", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• PDF OCR & Edit Features: {ocr_stat}", font=get_sys_font(8), fg="#047857" if lic_info.get("ocr_enabled") else "#D97706", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
         tk.Label(card2, text=f"• Expiry Date: {exp_date}", font=get_sys_font(8, "bold"), fg="#047857" if exp_date != "expired" else "#DC2626", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+        tk.Label(card2, text=f"• Support: WhatsApp +91 7016797720  |  Email: sales@a-b-infotech.in", font=get_sys_font(8), fg="#0284C7", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
         tk.Label(card2, text=f"• Platform: {CURRENT_OS} ({platform.machine()})", font=get_sys_font(8), bg="#FFFFFF").pack(anchor=tk.W, pady=2)
 
         btn_row = tk.Frame(outer, bg="#F1F5F9")
         btn_row.pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(btn_row, text="🔑 Enter License Key", style="Tool3D.TButton", command=self._show_activation_screen).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_row, text="🛒 Buy DSC / Renew License Online", style="Primary3D.TButton", command=self.open_buy_dsc).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_row, text="⚙️ Manage Token Drivers", style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_row, text="💬 WhatsApp: 9752318084", style="Tool3D.TButton", command=self.open_whatsapp).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="🔑 Enter License Key", style="Tool3D.TButton", command=self._show_activation_screen).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="🛒 Buy DSC / Renew", style="Primary3D.TButton", command=self.open_buy_dsc).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="🛠️ Token Driver Shortcuts", style="Tool3D.TButton", command=self.show_driver_shortcuts_dialog).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="⚙️ Manage Drivers", style="Tool3D.TButton", command=lambda: self.open_settings_dialog(initial_tab="drivers")).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="💬 WhatsApp: +91 7016797720", style="Tool3D.TButton", command=self.open_whatsapp).pack(side=tk.LEFT, padx=3)
 
     # =========================================================================
     # TAB 1 OPERATIONS (Sign PDF)
@@ -3736,6 +3808,14 @@ class VisualPdfSignerApp:
     # TAB 7 OPERATIONS (OCR & Edit)
     # =========================================================================
     def exec_ocr_extract(self):
+        if not LicenseManager.is_ocr_enabled():
+            messagebox.showwarning(
+                "Pro Edition Feature",
+                f"PDF OCR & Text Extraction is available in Pro and Enterprise editions.\n\n"
+                f"Current License: {LicenseManager.get_tier_label()} Edition\n\n"
+                f"Please contact A B INFOTECH at +91 7016797720 or sales@a-b-infotech.in to upgrade your license."
+            )
+            return
         p = self.ocr_pdf_path.get().strip()
         if not p or not os.path.exists(p):
             messagebox.showerror("Error", "Please select a PDF for OCR & Text extraction.")
@@ -3761,6 +3841,14 @@ class VisualPdfSignerApp:
             messagebox.showinfo("Saved", f"Text saved to:\n{f}")
 
     def exec_search_and_redact(self):
+        if not LicenseManager.is_edit_enabled():
+            messagebox.showwarning(
+                "Pro Edition Feature",
+                f"PDF Search & Redact / Edit is available in Pro and Enterprise editions.\n\n"
+                f"Current License: {LicenseManager.get_tier_label()} Edition\n\n"
+                f"Please contact A B INFOTECH at +91 7016797720 or sales@a-b-infotech.in to upgrade your license."
+            )
+            return
         p = self.redact_pdf_path.get().strip()
         term = self.redact_term_var.get().strip()
         if not p or not os.path.exists(p) or not term:
@@ -3799,7 +3887,10 @@ class VisualPdfSignerApp:
         self._open_url_in_app_mode(url, hide_window=False)
 
     def open_whatsapp(self):
-        webbrowser.open("https://wa.me/919752318084")
+        webbrowser.open("https://wa.me/917016797720")
+
+    def show_driver_shortcuts_dialog(self):
+        TokenDriverShortcutsDialog(self.root, self)
 
     def reload_drivers(self, select_driver=None):
         global DRIVER_MAP
@@ -3822,6 +3913,206 @@ class VisualPdfSignerApp:
         self.sign_add_files()
 
 
+
+
+# ==========================================
+# 4.45. TOKEN DRIVER SHORTCUTS & DIAGNOSTICS DIALOG
+# ==========================================
+class TokenDriverShortcutsDialog:
+    """
+    Unified Token Driver Setup, Diagnostics & Support Shortcuts Dialog.
+    Features:
+    - Status of Smart Card Service (SCardSvr)
+    - 1-Click Launchers for ePass2003, mToken, ProxKey, InnaIT managers
+    - Direct Windows System Tools: Device Manager (devmgmt.msc), Certificate Store (certmgr.msc)
+    - 1-Click Smart Card Service Restarter (fixes USB hardware detection)
+    - Official Driver Download Links & Web Portal
+    - Direct WhatsApp (+91 7016797720) & Email (sales@a-b-infotech.in) Support
+    """
+    def __init__(self, parent, main_app=None):
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(f"\U0001f6e0\ufe0f Token Driver Setup & Diagnostic Shortcuts [{CURRENT_OS}]")
+        self.dialog.geometry("720x620")
+        self.dialog.minsize(640, 540)
+        self.dialog.transient(parent)
+        self.main_app = main_app
+
+        if CURRENT_OS == 'Windows':
+            try:
+                self.dialog.attributes('-topmost', True)
+                self.dialog.after(200, lambda: self.dialog.attributes('-topmost', False))
+            except Exception:
+                pass
+
+        self._build_ui()
+
+    def _build_ui(self):
+        outer = tk.Frame(self.dialog, bg="#F1F5F9", padx=16, pady=12)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        # Header Bar
+        header = tk.Frame(outer, bg="#1E3A8A", padx=12, pady=10, relief=tk.RAISED, bd=1)
+        header.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(header, text="\U0001f50c A B INFOTECH - USB Token Driver Setup & Diagnostic Hub", font=get_sys_font(11, "bold"), fg="#FFFFFF", bg="#1E3A8A").pack(anchor=tk.W)
+        tk.Label(header, text="Fast 1-click shortcuts to setup, diagnose, and repair USB Cryptographic Tokens on your computer.", font=get_sys_font(8), fg="#BFDBFE", bg="#1E3A8A").pack(anchor=tk.W, pady=(2, 0))
+
+        # CARD 1: Windows System Hardware & Certificate Utilities
+        c1 = tk.Frame(outer, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c1.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(c1, text="1. Windows System Hardware & Certificate Diagnostics", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c1, text="Use these tools to verify if Windows detects your USB Smart Card Token and certificates correctly:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        c1_grid = tk.Frame(c1, bg="#FFFFFF")
+        c1_grid.pack(fill=tk.X)
+
+        ttk.Button(c1_grid, text="\U0001f5a5\ufe0f Open Device Manager (devmgmt.msc)", style="Tool3D.TButton", command=self._open_devmgmt).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c1_grid, text="\U0001f4dc Open User Certificates (certmgr.msc)", style="Tool3D.TButton", command=self._open_certmgr_user).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(c1_grid, text="\U0001f3e2 Open Machine Certificates (certlm.msc)", style="Tool3D.TButton", command=self._open_certmgr_machine).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c1_grid, text="\U0001f504 Restart Smart Card Service (SCardSvr)", style="Primary3D.TButton", command=self._restart_scardsvr).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+        c1_grid.columnconfigure(0, weight=1)
+        c1_grid.columnconfigure(1, weight=1)
+
+        # CARD 2: Launch Installed Token Utilities
+        c2 = tk.Frame(outer, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c2.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(c2, text="2. Installed Token Management Utilities (1-Click Launchers)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c2, text="Launch the official admin app for your USB token to view certificate details or test PIN:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        c2_grid = tk.Frame(c2, bg="#FFFFFF")
+        c2_grid.pack(fill=tk.X)
+        ttk.Button(c2_grid, text="\U0001f680 Launch ePass2003 Manager", style="Tool3D.TButton", command=self._launch_epass).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="\U0001f680 Launch mToken / CryptoID Utility", style="Tool3D.TButton", command=self._launch_mtoken).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="\U0001f680 Launch Watchdata PROXKey Utility", style="Tool3D.TButton", command=self._launch_proxkey).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="\U0001f50c Open Custom Driver Manager", style="Tool3D.TButton", command=self._open_custom_driver_settings).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+        c2_grid.columnconfigure(0, weight=1)
+        c2_grid.columnconfigure(1, weight=1)
+
+        # CARD 3: Technical Support & Downloads
+        c3 = tk.Frame(outer, bg="#F0F9FF", relief=tk.SOLID, bd=1, padx=12, pady=10)
+        c3.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(c3, text="3. Direct A B INFOTECH Technical Support & Driver Downloads", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c3, text="Need help installing drivers or setting up your hardware token? Our engineers are available:", font=get_sys_font(8), fg="#0284C7", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 6))
+
+        c3_btn_row = tk.Frame(c3, bg="#F0F9FF")
+        c3_btn_row.pack(fill=tk.X)
+        ttk.Button(c3_btn_row, text="\U0001f4ac WhatsApp Support (+91 7016797720)", style="Primary3D.TButton", command=self._open_whatsapp_support).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(c3_btn_row, text="\U0001f4e7 Email: sales@a-b-infotech.in", style="Tool3D.TButton", command=self._open_email_support).pack(side=tk.LEFT, padx=6)
+        ttk.Button(c3_btn_row, text="\U0001f310 Download Drivers Online", style="Tool3D.TButton", command=self._open_driver_download).pack(side=tk.LEFT, padx=6)
+
+        # Bottom Close Button
+        btn_bot = tk.Frame(outer, bg="#F1F5F9")
+        btn_bot.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(btn_bot, text="Close Shortcuts", style="Tool3D.TButton", command=self.dialog.destroy).pack(side=tk.RIGHT)
+
+    def _open_devmgmt(self):
+        if CURRENT_OS == 'Windows':
+            try:
+                subprocess.Popen(["devmgmt.msc"], shell=True)
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not launch Device Manager: {e}", parent=self.dialog)
+        else:
+            messagebox.showinfo("Info", "Device Manager is a Windows system tool.", parent=self.dialog)
+
+    def _open_certmgr_user(self):
+        if CURRENT_OS == 'Windows':
+            try:
+                subprocess.Popen(["certmgr.msc"], shell=True)
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not launch Certificate Manager: {e}", parent=self.dialog)
+        else:
+            messagebox.showinfo("Info", "Certificate Manager is a Windows system tool.", parent=self.dialog)
+
+    def _open_certmgr_machine(self):
+        if CURRENT_OS == 'Windows':
+            try:
+                subprocess.Popen(["certlm.msc"], shell=True)
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not launch Machine Certificate Manager: {e}", parent=self.dialog)
+        else:
+            messagebox.showinfo("Info", "Local Machine Certificate Manager is a Windows system tool.", parent=self.dialog)
+
+    def _restart_scardsvr(self):
+        if CURRENT_OS != 'Windows':
+            messagebox.showinfo("Notice", "Smart Card Service restart is only applicable on Windows.", parent=self.dialog)
+            return
+        try:
+            cmd = 'powershell -Command "Restart-Service -Name SCardSvr -Force -ErrorAction SilentlyContinue"'
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if res.returncode == 0:
+                messagebox.showinfo("Service Restarted", "Windows Smart Card Service (SCardSvr) restarted successfully!\n\nPlease re-insert your USB Token and click Refresh in the main window.", parent=self.dialog)
+            else:
+                subprocess.run("net stop scardsvr && net start scardsvr", shell=True, capture_output=True)
+                messagebox.showinfo("Service Command Issued", "Smart Card service restart executed.\nPlease re-insert your USB Token.", parent=self.dialog)
+            if self.main_app:
+                self.main_app.load_token_certificates()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to restart service: {e}", parent=self.dialog)
+
+    def _launch_epass(self):
+        paths = [
+            r"C:\Program Files (x86)\ePass2003-India-Auto\ePass2003_India_Auto.exe",
+            r"C:\Program Files\EnterSafe\ePass2003\eps2003.exe",
+            r"C:\Program Files (x86)\EnterSafe\ePass2003\eps2003.exe",
+            r"C:\Program Files (x86)\Professional Digisign Private Limited\ProdigiSignStore\eps2003.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                try:
+                    subprocess.Popen([p])
+                    return
+                except Exception:
+                    pass
+        if messagebox.askyesno("Not Found", "ePass2003 Manager was not found in default paths.\n\nWould you like to open the official driver download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _launch_mtoken(self):
+        paths = [
+            r"C:\Program Files (x86)\mToken\mToken.exe",
+            r"C:\Program Files\mToken\mToken.exe",
+            r"C:\Program Files (x86)\CryptoID\CryptoID.exe",
+            r"C:\Program Files\CryptoID\CryptoID.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                try:
+                    subprocess.Popen([p])
+                    return
+                except Exception:
+                    pass
+        if messagebox.askyesno("Not Found", "mToken / CryptoID Utility was not found in default paths.\n\nWould you like to open the official driver download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _launch_proxkey(self):
+        paths = [
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdkmgr.exe",
+            r"C:\Program Files (x86)\Watchdata\PROXKey\wdkmgr.exe",
+            r"C:\Program Files\Watchdata\PROXKey\wdkmgr.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                try:
+                    subprocess.Popen([p])
+                    return
+                except Exception:
+                    pass
+        if messagebox.askyesno("Not Found", "Watchdata PROXKey Utility was not found in default paths.\n\nWould you like to open the official driver download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _open_custom_driver_settings(self):
+        self.dialog.destroy()
+        if self.main_app:
+            self.main_app.open_settings_dialog(initial_tab="drivers")
+
+    def _open_whatsapp_support(self):
+        msg = urllib.parse.quote("Hello A B INFOTECH Team, I need technical assistance with Token Driver Setup & Digital Signatures.")
+        webbrowser.open(f"https://wa.me/917016797720?text={msg}")
+
+    def _open_email_support(self):
+        subj = urllib.parse.quote("Technical Support: Token Driver Setup")
+        webbrowser.open(f"mailto:sales@a-b-infotech.in?subject={subj}")
+
+    def _open_driver_download(self):
+        webbrowser.open("https://a-b-infotech.in")
 
 # ==========================================
 # 4.5. BULK SIGN FOLDER & PROGRESS DIALOGS
@@ -4330,7 +4621,8 @@ class SettingsDialog:
         btn_f = tk.Frame(add_card, bg="#FFFFFF")
         btn_f.pack(anchor=tk.W, pady=(8, 2))
         ttk.Button(btn_f, text="🧪 Test Driver Library", style="Tool3D.TButton", command=self._test_driver).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btn_f, text="➕ Add & Save Driver", style="Primary3D.TButton", command=self._add_driver).pack(side=tk.LEFT)
+        ttk.Button(btn_f, text="➕ Add & Save Driver", style="Primary3D.TButton", command=self._add_driver).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_f, text="🛠️ Driver Setup Shortcuts & Tools", style="Tool3D.TButton", command=self.main_app.show_driver_shortcuts_dialog).pack(side=tk.LEFT)
 
         # Existing Custom Drivers List
         list_card = tk.Frame(parent, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=10, pady=8)
