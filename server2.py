@@ -2710,10 +2710,11 @@ class TokenDriverShortcutsDialog:
 
         c2_grid = tk.Frame(c2, bg="#FFFFFF")
         c2_grid.pack(fill=tk.X)
-        ttk.Button(c2_grid, text="🚀 Launch ePass2003 Manager", style="Tool3D.TButton", command=self._launch_epass).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
-        ttk.Button(c2_grid, text="🚀 Launch mToken / CryptoID Utility", style="Tool3D.TButton", command=self._launch_mtoken).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
-        ttk.Button(c2_grid, text="🚀 Launch Watchdata PROXKey Utility", style="Tool3D.TButton", command=self._launch_proxkey).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
-        ttk.Button(c2_grid, text="🔌 Open Custom Driver Manager", style="Tool3D.TButton", command=self._open_custom_driver_settings).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="🚀 Launch ePass2003 / HyperPKI", style="Tool3D.TButton", command=self._launch_epass).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="🚀 Launch mToken / CryptoID", style="Tool3D.TButton", command=self._launch_mtoken).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="🚀 Launch Watchdata PROXKey", style="Tool3D.TButton", command=self._launch_proxkey).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="🚀 Launch InnaIT DSC Utility", style="Tool3D.TButton", command=self._launch_innait).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(c2_grid, text="🔌 Open Custom Driver Manager", style="Tool3D.TButton", command=self._open_custom_driver_settings).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
         c2_grid.columnconfigure(0, weight=1)
         c2_grid.columnconfigure(1, weight=1)
 
@@ -2770,6 +2771,8 @@ class TokenDriverShortcutsDialog:
 
     def _launch_epass(self):
         paths = [
+            r"C:\Program Files (x86)\HyperPKI\HyperPKI_HYP2003\HyperPKITokenManager_HYP2003.exe",
+            r"C:\Program Files\HyperPKI\HyperPKI_HYP2003\HyperPKITokenManager_HYP2003.exe",
             r"C:\Program Files (x86)\ePass2003-India-Auto\ePass2003_India_Auto.exe",
             r"C:\Program Files\EnterSafe\ePass2003\eps2003.exe",
             r"C:\Program Files (x86)\EnterSafe\ePass2003\eps2003.exe",
@@ -2778,11 +2781,15 @@ class TokenDriverShortcutsDialog:
         for p in paths:
             if os.path.exists(p):
                 subprocess.Popen([p]); return
-        if messagebox.askyesno("Not Found", "ePass2003 Manager not found. Open driver download portal?", parent=self.dialog):
+        if messagebox.askyesno("Not Found", "ePass2003 / HyperPKI Manager not found at standard path.\nOpen driver download portal?", parent=self.dialog):
             self._open_driver_download()
 
     def _launch_mtoken(self):
         paths = [
+            r"C:\Program Files (x86)\CryptoID\CryptoIDMgr.exe",
+            r"C:\Program Files (x86)\CryptoID\CryptoIDCertUtilityF3\CryptoIDMgr.exe",
+            r"C:\Program Files\CryptoID\CryptoIDMgr.exe",
+            r"C:\Program Files\CryptoID\CryptoIDCertUtilityF3\CryptoIDMgr.exe",
             r"C:\Program Files (x86)\mToken\mToken.exe",
             r"C:\Program Files\mToken\mToken.exe",
             r"C:\Program Files (x86)\CryptoID\CryptoID.exe"
@@ -2790,18 +2797,36 @@ class TokenDriverShortcutsDialog:
         for p in paths:
             if os.path.exists(p):
                 subprocess.Popen([p]); return
-        if messagebox.askyesno("Not Found", "mToken / CryptoID Utility not found. Open download portal?", parent=self.dialog):
+        if messagebox.askyesno("Not Found", "mToken / CryptoID Utility not found at standard path.\nOpen download portal?", parent=self.dialog):
             self._open_driver_download()
 
     def _launch_proxkey(self):
         paths = [
+            r"C:\Program Files (x86)\Watchdata\WD PROXKey\WDAdmintool.exe",
+            r"C:\Program Files\Watchdata\WD PROXKey\WDAdmintool.exe",
             r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdkmgr.exe",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\wdkmgr.exe",
             r"C:\Program Files (x86)\Watchdata\PROXKey\wdkmgr.exe"
         ]
         for p in paths:
             if os.path.exists(p):
                 subprocess.Popen([p]); return
-        if messagebox.askyesno("Not Found", "Watchdata PROXKey Utility not found. Open download portal?", parent=self.dialog):
+        if messagebox.askyesno("Not Found", "Watchdata WD PROXKey Utility not found at standard path.\nOpen download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _launch_innait(self):
+        paths = [
+            r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC\InnaITDSCApplication.exe",
+            r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC \InnaITDSCApplication.exe",
+            r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC\InnaITDSCApplication.exe",
+            r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC \InnaITDSCApplication.exe",
+            r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC\InnaITDSC.exe",
+            r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC\InnaITDSC.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                subprocess.Popen([p]); return
+        if messagebox.askyesno("Not Found", "InnaIT DSC Utility (Precision Biometric) not found at standard path.\nOpen driver download portal?", parent=self.dialog):
             self._open_driver_download()
 
     def _open_custom_driver_settings(self):
@@ -3525,89 +3550,98 @@ class VisualPdfSignerApp:
         self.notebook.add(self.tab_tools, text=" 🛠️ PDF Tools ")
         self._build_tab_tools(self.tab_tools)
 
-        # 6. 📖 OCR & Edit Tab (Full Virtual Display Interactive Text Editor - Pro Only)
-        self.tab_ocr_edit = ttk.Frame(self.notebook)
-        if LicenseManager.is_pro():
-            self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
-        self._build_tab_ocr_edit(self.tab_ocr_edit)
-
-        # 7. ℹ️ About & License
-        self.tab_about = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_about, text=" ℹ️ About & License ")
-        self._build_tab_about(self.tab_about)
-
-    def apply_feature_gating(self):
-        """Dynamically update UI features based on active license tier (Basic vs Pro)."""
-        is_pro = LicenseManager.is_pro()
-        tabs = self.notebook.tabs()
-        if is_pro:
-            if str(self.tab_ocr_edit) not in tabs:
-                about_idx = -1
-                for idx, t in enumerate(tabs):
-                    if t == str(self.tab_about):
-                        about_idx = idx
-                        break
-                if about_idx >= 0:
-                    self.notebook.insert(about_idx, self.tab_ocr_edit, text=" 📖 OCR & Edit ")
-                else:
-                    self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
-            if hasattr(self, 'btn_signature_settings') and not self.btn_signature_settings.winfo_ismapped():
-                self.btn_signature_settings.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        else:
-            if str(self.tab_ocr_edit) in tabs:
-                self.notebook.forget(self.tab_ocr_edit)
-            if hasattr(self, 'btn_signature_settings') and self.btn_signature_settings.winfo_ismapped():
-                self.btn_signature_settings.pack_forget()
-
-    # =========================================================================
-    # TAB 1: ✍️ SIGN PDF (Restored Classic Split Layout with Live Canvas)
-    # =========================================================================
-    def _build_tab_sign(self, parent):
+        # 6. 📖 OCR & Edit Tab (Full Virtual Disp    def _build_tab_sign(self, parent):
         split = tk.Frame(parent, bg="#F1F5F9")
         split.pack(fill=tk.BOTH, expand=True)
 
         # ----------------------------------------------------
         # LEFT PANEL: Signing Controls, Logo & Old DSC Options
         # ----------------------------------------------------
-        left_panel = tk.Frame(split, bg="#FFFFFF", width=440, padx=10, pady=8, relief=tk.RAISED, bd=1)
+        left_panel = tk.Frame(split, bg="#FFFFFF", width=440, padx=10, pady=6, relief=tk.RAISED, bd=1)
         left_panel.pack(side=tk.LEFT, fill=tk.Y)
         left_panel.pack_propagate(False)
 
-        # Bottom Big Signing Button - Packed FIRST at bottom to ensure it is NEVER cut off!
+        # -----------------------------------------------------------------
+        # BOTTOM CONTROLS CLUSTER: Packed at tk.BOTTOM so it is NEVER clipped!
+        # Always visible:
+        # [⚙️ Signature Settings] [📁 Bulk Sign] [❌ Clear PDF]
+        # Ready status label
+        # [🚀 SIGN & SAVE PDF DOCUMENT]
+        # Adobe disclaimer
+        # -----------------------------------------------------------------
         bot_f = tk.Frame(left_panel, bg="#FFFFFF")
         bot_f.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 2))
 
-        self.lbl_sign_status = tk.Label(bot_f, text="Ready. Open a PDF document on the right to begin.", font=get_sys_font(8), fg="#059669", bg="#FFFFFF", wraplength=410, justify="left")
-        self.lbl_sign_status.pack(pady=(0, 4))
+        action_row = tk.Frame(bot_f, bg="#FFFFFF")
+        action_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
 
-        self.btn_sign_doc = ttk.Button(bot_f, text="🚀 SIGN & SAVE PDF DOCUMENT", style="Primary3D.TButton", command=self.start_signing)
-        self.btn_sign_doc.pack(fill=tk.X, ipady=5)
+        self.btn_signature_settings = ttk.Button(
+            action_row, text="⚙️ Signature Settings", style="Tool3D.TButton", command=self.open_signature_settings
+        )
+        self.btn_signature_settings.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+
+        self.btn_bulk_sign = ttk.Button(
+            action_row, text="📁 Bulk Sign", style="Tool3D.TButton", command=self.open_batch_dialog
+        )
+        self.btn_bulk_sign.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+        self.btn_clear_pdf = ttk.Button(
+            action_row, text="❌ Clear PDF", style="Tool3D.TButton", command=self._clear_sign_pdf
+        )
+        self.btn_clear_pdf.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
+
+        self.lbl_sign_status = tk.Label(
+            bot_f,
+            text="Ready. Open a PDF document on the right to begin.",
+            font=get_sys_font(8),
+            fg="#059669",
+            bg="#FFFFFF",
+            wraplength=410,
+            justify="left"
+        )
+        self.lbl_sign_status.pack(pady=(2, 3))
+
+        self.btn_sign_doc = ttk.Button(
+            bot_f,
+            text="🚀 SIGN & SAVE PDF DOCUMENT",
+            style="Primary3D.TButton",
+            command=self.start_signing
+        )
+        self.btn_sign_doc.pack(fill=tk.X, ipady=4)
 
         disclaimer = "Note: Adobe validity tick depends on Adobe's live validation & Trusted Root list."
-        tk.Label(bot_f, text=disclaimer, font=get_sys_font(7, "italic"), fg="#DC2626", bg="#FFFFFF", wraplength=410).pack(pady=(3, 0))
+        tk.Label(bot_f, text=disclaimer, font=get_sys_font(7, "italic"), fg="#DC2626", bg="#FFFFFF", wraplength=410).pack(pady=(2, 0))
 
-        # Prominent Compact Logo in Left Panel
-        logo_frame = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SOLID, bd=1, padx=6, pady=4)
-        logo_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        # -----------------------------------------------------------------
+        # TOP WIDGETS: Logo, Certificate Source, Options, Selected Areas
+        # -----------------------------------------------------------------
+        # Compact Logo Card (Horizontal Layout saves vertical space)
+        logo_frame = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SOLID, bd=1, padx=6, pady=3)
+        logo_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 3))
 
-        self.tk_big_logo = load_abinfotech_logo(max_size=(130, 48))
+        self.tk_big_logo = load_abinfotech_logo(max_size=(90, 32))
         if self.tk_big_logo:
-            tk.Label(logo_frame, image=self.tk_big_logo, bg="#F8FAFC").pack()
-        tk.Label(logo_frame, text="A B INFOTECH", font=get_sys_font(11, "bold"), fg="#1E3A8A", bg="#F8FAFC").pack(pady=(2, 0))
-        tk.Label(logo_frame, text="Local Digital Signature Suite", font=get_sys_font(8), fg="#059669", bg="#F8FAFC").pack()
+            tk.Label(logo_frame, image=self.tk_big_logo, bg="#F8FAFC").pack(side=tk.LEFT, padx=(4, 8))
+            txt_box = tk.Frame(logo_frame, bg="#F8FAFC")
+            txt_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            tk.Label(txt_box, text="A B INFOTECH", font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#F8FAFC", anchor=tk.W).pack(anchor=tk.W)
+            tk.Label(txt_box, text="Local Digital Signature Suite", font=get_sys_font(7), fg="#059669", bg="#F8FAFC", anchor=tk.W).pack(anchor=tk.W)
+        else:
+            tk.Label(logo_frame, text="A B INFOTECH", font=get_sys_font(10, "bold"), fg="#1E3A8A", bg="#F8FAFC").pack()
+            tk.Label(logo_frame, text="Local Digital Signature Suite", font=get_sys_font(7), fg="#059669", bg="#F8FAFC").pack()
 
         # Certificate Source Options: Only the 2 Classic Options (USB Token & PFX File)
         tk.Label(left_panel, text="Digital Certificate Source:", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(side=tk.TOP, anchor=tk.W)
 
         self.nb_dsc = ttk.Notebook(left_panel)
-        self.nb_dsc.pack(side=tk.TOP, fill=tk.X, pady=(2, 4))
+        self.nb_dsc.pack(side=tk.TOP, fill=tk.X, pady=(1, 3))
 
         # Sub-tab 1: USB Hardware Token (PKCS#11)
-        f_token = ttk.Frame(self.nb_dsc, padding=4)
+        f_token = ttk.Frame(self.nb_dsc, padding=3)
         self.nb_dsc.add(f_token, text=" 🔌 USB Hardware Token ")
 
         tk.Label(f_token, text="Select Token Driver:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
-        d_row = tk.Frame(f_token); d_row.pack(fill=tk.X, pady=(1, 3))
+        d_row = tk.Frame(f_token); d_row.pack(fill=tk.X, pady=(1, 2))
         self.token_driver_combo = ttk.Combobox(d_row, textvariable=self.driver_var, values=list(DRIVER_MAP.keys()), state="readonly", font=get_sys_font(8))
         self.token_driver_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         if DRIVER_MAP: self.token_driver_combo.current(0)
@@ -3615,7 +3649,7 @@ class VisualPdfSignerApp:
 
         tk.Label(f_token, text="Certificate in Token:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
         self.token_cert_combo = ttk.Combobox(f_token, state="readonly", font=get_sys_font(8))
-        self.token_cert_combo.pack(fill=tk.X, pady=(1, 3))
+        self.token_cert_combo.pack(fill=tk.X, pady=(1, 2))
         self.token_cert_combo.bind("<<ComboboxSelected>>", self._on_token_cert_selected)
 
         pin_row = tk.Frame(f_token); pin_row.pack(fill=tk.X, pady=(1, 1))
@@ -3624,11 +3658,11 @@ class VisualPdfSignerApp:
         ttk.Button(pin_row, text="🛠️ Driver Shortcuts", style="Tool3D.TButton", command=self.show_driver_shortcuts_dialog).pack(side=tk.RIGHT)
 
         # Sub-tab 2: PFX / P12 File
-        f_pfx = ttk.Frame(self.nb_dsc, padding=4)
+        f_pfx = ttk.Frame(self.nb_dsc, padding=3)
         self.nb_dsc.add(f_pfx, text=" 🔑 PFX / P12 File ")
 
         tk.Label(f_pfx, text="Select .PFX / .P12 File:", font=get_sys_font(8, "bold"), fg="#1E3A8A").pack(anchor=tk.W)
-        p_row1 = tk.Frame(f_pfx); p_row1.pack(fill=tk.X, pady=(1, 3))
+        p_row1 = tk.Frame(f_pfx); p_row1.pack(fill=tk.X, pady=(1, 2))
         ttk.Entry(p_row1, textvariable=self.pfx_path_var, font=get_sys_font(8)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         ttk.Button(p_row1, text="Browse...", style="Tool3D.TButton", command=self.browse_pfx_file).pack(side=tk.RIGHT)
 
@@ -3638,8 +3672,8 @@ class VisualPdfSignerApp:
         ttk.Button(p_row2, text="Verify", style="Tool3D.TButton", command=lambda: self.verify_pfx_certificate(silent=False)).pack(side=tk.LEFT)
 
         # 4 Options Card: Reason, Address, Sign all pages, Checkbox Bar
-        opts_card = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SOLID, bd=1, padx=6, pady=4)
-        opts_card.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        opts_card = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SOLID, bd=1, padx=6, pady=3)
+        opts_card.pack(side=tk.TOP, fill=tk.X, pady=(0, 3))
 
         # 1. Reason
         r_row = tk.Frame(opts_card, bg="#F8FAFC")
@@ -3665,7 +3699,7 @@ class VisualPdfSignerApp:
 
         # 4. Checkbox bar in 2 clean rows so "Border" is never cut off
         chk_bar1 = tk.Frame(opts_card, bg="#F8FAFC")
-        chk_bar1.pack(fill=tk.X, pady=(1, 0))
+        chk_bar1.pack(fill=tk.X, pady=(0, 0))
         for text, var in [
             ("Name", self.show_name_var),
             ("Date", self.show_date_var),
@@ -3680,7 +3714,7 @@ class VisualPdfSignerApp:
             ).pack(side=tk.LEFT, padx=1)
 
         chk_bar2 = tk.Frame(opts_card, bg="#F8FAFC")
-        chk_bar2.pack(fill=tk.X, pady=(1, 0))
+        chk_bar2.pack(fill=tk.X, pady=(0, 0))
         for text, var in [
             ("Issuer", self.show_issuer_var),
             ("Green tick", self.show_tick_var),
@@ -3695,23 +3729,12 @@ class VisualPdfSignerApp:
 
         # Selected Signature Areas Listbox / Container
         tk.Label(left_panel, text="Selected Signature Area(s):", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(side=tk.TOP, anchor=tk.W, pady=(2, 1))
-        self.area_container = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SUNKEN, bd=1, height=58)
-        self.area_container.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        self.area_container = tk.Frame(left_panel, bg="#F8FAFC", relief=tk.SUNKEN, bd=1, height=44)
+        self.area_container.pack(side=tk.TOP, fill=tk.X, pady=(0, 3))
         self.area_container.pack_propagate(False)
 
         self.lbl_no_areas = tk.Label(self.area_container, text="No area selected yet.\nClick 'Draw Signature Box' on the right canvas.", font=get_sys_font(8), fg="#64748B", bg="#F8FAFC")
         self.lbl_no_areas.pack(expand=True)
-
-        # Actions & Settings Buttons
-        action_row = tk.Frame(left_panel, bg="#FFFFFF")
-        action_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
-
-        if LicenseManager.is_pro():
-            self.btn_signature_settings = ttk.Button(action_row, text="⚙️ Signature Settings", style="Tool3D.TButton", command=self.open_signature_settings)
-            self.btn_signature_settings.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        self.btn_bulk_sign = ttk.Button(action_row, text="📁 Bulk Sign", style="Tool3D.TButton", command=self.open_batch_dialog)
-        self.btn_bulk_sign.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(action_row, text="❌ Clear PDF", style="Tool3D.TButton", command=self._clear_sign_pdf).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
 
         # ----------------------------------------------------
         # RIGHT PANEL: Live Interactive PDF Canvas Viewer
