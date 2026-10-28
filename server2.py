@@ -483,6 +483,21 @@ def find_epass_driver_path():
             return p
     return r"C:\Windows\System32\eps2003csp11v2.dll"
 
+def find_innait_driver_path():
+    candidates = [
+        r"C:\Windows\System32\InnaITPKCS11Driver.dll",
+        r"C:\Windows\SysWOW64\InnaITPKCS11Driver.dll",
+        r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC\InnaITPKCS11Driver.dll",
+        r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC\InnaITPKCS11Driver.dll",
+        r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC \InnaITPKCS11Driver.dll",
+        r"C:\Windows\System32\InnaITDSCLibrary.dll",
+        r"C:\Windows\SysWOW64\InnaITDSCLibrary.dll"
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return r"C:\Windows\System32\InnaITPKCS11Driver.dll"
+
 CUSTOM_DRIVERS_FILE = os.path.join(APP_DIR, "custom_drivers.json")
 
 def load_custom_drivers():
@@ -507,11 +522,13 @@ def get_platform_drivers():
         p64 = r"C:\WINDOWS\system32\cryptoida_pkcs11.dll"
         p32 = r"C:\WINDOWS\sysWOW64\cryptoida_pkcs11.dll"
         mtoken = p64 if (is_64bit and os.path.exists(p64)) else p32
+        innait_driver = find_innait_driver_path()
 
         drivers["ePass2003 Token"] = find_epass_driver_path()
         drivers["ProxKey India"] = r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdpkcs.dll"
         drivers["mToken / CryptoID"] = mtoken
-        drivers["InnaIT Token"] = r"C:\Windows\System32\InnaITPKCS11Driver.dll"
+        drivers["InnaIT / Precision Biometric Token"] = innait_driver
+        drivers["InnaIT Token"] = innait_driver
         
         opensc_win = r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"
         if os.path.exists(opensc_win):
@@ -521,11 +538,13 @@ def get_platform_drivers():
         drivers["ePass2003 Token (macOS)"] = "/Library/EnterSafe/libcastle.dylib"
         drivers["ProxKey India (macOS)"] = "/Library/ProxKey/libWD_PKCS11.dylib"
         drivers["mToken / CryptoID (macOS)"] = "/Library/mToken/libcryptoid_pkcs11.dylib"
+        drivers["InnaIT Token (macOS)"] = "/usr/local/lib/libinnait_pkcs11.dylib"
         drivers["OpenSC (macOS)"] = "/opt/homebrew/lib/opensc-pkcs11.so"
     else:
         drivers["ePass2003 Token (Linux)"] = "/usr/lib/libcastle.so.1.0.0"
         drivers["ProxKey India (Linux)"] = "/usr/lib/libWatchdataPKCS11.so"
         drivers["mToken / CryptoID (Linux)"] = "/usr/lib/libcryptoid_pkcs11.so"
+        drivers["InnaIT Token (Linux)"] = "/usr/lib/libinnait_pkcs11.so"
         drivers["OpenSC (Linux)"] = "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
 
     custom = load_custom_drivers()
@@ -2930,12 +2949,30 @@ class SettingsDialog:
         c1_grid.columnconfigure(1, weight=1)
 
         # ----------------------------------------------------
-        # SECTION 2: Official Token Drivers Download & Support
+        # SECTION 2: Installed USB Token Management Utilities
+        # ----------------------------------------------------
+        c_launch = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c_launch.pack(fill=tk.X, padx=4, pady=(0, 10))
+
+        tk.Label(c_launch, text="2. Installed USB Token Management Utilities", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 2))
+        tk.Label(c_launch, text="Launch official token utilities to test PIN, view hardware certificates, or configure token:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        launch_grid = tk.Frame(c_launch, bg="#FFFFFF")
+        launch_grid.pack(fill=tk.X)
+        ttk.Button(launch_grid, text="🔑 ePass2003 Manager", style="Tool3D.TButton", command=self._launch_epass).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(launch_grid, text="🔑 mToken / CryptoID Utility", style="Tool3D.TButton", command=self._launch_mtoken).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+        ttk.Button(launch_grid, text="🔑 Watchdata PROXKey Admin", style="Tool3D.TButton", command=self._launch_proxkey).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+        ttk.Button(launch_grid, text="🔑 InnaIT DSC Utility (Precision)", style="Tool3D.TButton", command=self._launch_innait).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+        launch_grid.columnconfigure(0, weight=1)
+        launch_grid.columnconfigure(1, weight=1)
+
+        # ----------------------------------------------------
+        # SECTION 3: Official Token Drivers Download & Support
         # ----------------------------------------------------
         c2 = tk.Frame(scroll_frame, bg="#F0F9FF", relief=tk.SOLID, bd=1, padx=12, pady=10)
         c2.pack(fill=tk.X, padx=4, pady=(0, 10))
 
-        tk.Label(c2, text="2. Official USB Token Drivers Download & Technical Support", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 2))
+        tk.Label(c2, text="3. Official USB Token Drivers Download & Technical Support", font=get_sys_font(10, "bold"), fg="#0369A1", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 2))
         tk.Label(c2, text="Download verified drivers for ePass2003, mToken, ProxKey, InnaIT or get instant technical support:", font=get_sys_font(8), fg="#0284C7", bg="#F0F9FF").pack(anchor=tk.W, pady=(0, 6))
 
         c2_btn_row = tk.Frame(c2, bg="#F0F9FF")
@@ -2945,13 +2982,13 @@ class SettingsDialog:
         ttk.Button(c2_btn_row, text="📧 Email: sales@a-b-infotech.in", style="Tool3D.TButton", command=self._open_email_support).pack(side=tk.LEFT, padx=3)
 
         # ----------------------------------------------------
-        # SECTION 3: Register Custom Token Driver (PKCS#11)
+        # SECTION 4: Register Custom Token Driver (PKCS#11)
         # ----------------------------------------------------
         ext = ".dll" if CURRENT_OS == 'Windows' else (".dylib" if CURRENT_OS == 'Darwin' else ".so")
         c3 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
         c3.pack(fill=tk.X, padx=4, pady=(0, 10))
 
-        tk.Label(c3, text="3. Register Custom Token Driver (PKCS#11)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c3, text="4. Register Custom Token Driver (PKCS#11)", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
         f_grid = tk.Frame(c3, bg="#FFFFFF"); f_grid.pack(fill=tk.X, pady=4)
 
         tk.Label(f_grid, text="Token Name:", font=get_sys_font(8, "bold"), bg="#FFFFFF").grid(row=0, column=0, sticky="w", pady=3)
@@ -3035,6 +3072,21 @@ class SettingsDialog:
             if os.path.exists(p):
                 subprocess.Popen([p]); return
         if messagebox.askyesno("Not Found", "Watchdata PROXKey Utility not found. Open download portal?", parent=self.dialog):
+            self._open_driver_download()
+
+    def _launch_innait(self):
+        paths = [
+            r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC\InnaITDSCApplication.exe",
+            r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC \InnaITDSCApplication.exe",
+            r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC\InnaITDSCApplication.exe",
+            r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC \InnaITDSCApplication.exe",
+            r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC\InnaITDSC.exe",
+            r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC\InnaITDSC.exe"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                subprocess.Popen([p]); return
+        if messagebox.askyesno("Not Found", "InnaIT DSC Application (Precision Biometric) not found at default location.\nOpen driver download portal?", parent=self.dialog):
             self._open_driver_download()
 
     def _open_whatsapp_support(self):
