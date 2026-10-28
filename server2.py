@@ -473,14 +473,25 @@ def _pick_best_pkcs11_dll(candidates):
     First checks if the DLL exists and loads cleanly via pkcs11, then falls back to first existing.
     """
     for p in candidates:
-        if p and os.path.exists(p) and p.lower().endswith('.dll'):
+        if not p: continue
+        target = p
+        if target.lower().endswith('.sig'):
+            target = target[:-4] + '.dll'
+        if os.path.exists(target) and target.lower().endswith('.dll'):
             try:
-                pkcs11.lib(p)
-                return p
+                pkcs11.lib(target)
+                return target
             except Exception:
                 pass
     for p in candidates:
-        if p and os.path.exists(p) and p.lower().endswith('.dll'):
+        if not p: continue
+        target = p
+        if target.lower().endswith('.sig'):
+            target = target[:-4] + '.dll'
+        if os.path.exists(target) and target.lower().endswith('.dll'):
+            return target
+    for p in candidates:
+        if p and os.path.exists(p):
             return p
     return candidates[0] if candidates else ""
 
@@ -489,12 +500,14 @@ def find_epass_driver_path():
     if is_64bit:
         candidates = [
             r"C:\Windows\System32\HYP2003csp11IND.dll",
+            r"C:\Windows\System32\HYP2003csp11IND.sig",
             r"C:\Windows\System32\HYP2003csp11IND_s.dll",
+            r"C:\Windows\SysWOW64\HYP2003csp11IND.dll",
+            r"C:\Windows\SysWOW64\HYP2003csp11IND.sig",
+            r"C:\Windows\SysWOW64\HYP2003csp11IND_s.dll",
             r"C:\Windows\System32\eps2003csp11v2.dll",
             r"C:\Program Files (x86)\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
             r"C:\Program Files\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
-            r"C:\Windows\SysWOW64\HYP2003csp11IND.dll",
-            r"C:\Windows\SysWOW64\HYP2003csp11IND_s.dll",
             r"C:\Windows\SysWOW64\eps2003csp11v2.dll",
             r"C:\Program Files\ePass2003-India-Auto\eps2003csp11v2.dll",
             r"C:\Program Files (x86)\ePass2003-India-Auto\eps2003csp11v2.dll",
@@ -504,8 +517,11 @@ def find_epass_driver_path():
     else:
         candidates = [
             r"C:\Windows\SysWOW64\HYP2003csp11IND.dll",
+            r"C:\Windows\SysWOW64\HYP2003csp11IND.sig",
             r"C:\Windows\SysWOW64\HYP2003csp11IND_s.dll",
             r"C:\Windows\System32\HYP2003csp11IND.dll",
+            r"C:\Windows\System32\HYP2003csp11IND.sig",
+            r"C:\Windows\System32\HYP2003csp11IND_s.dll",
             r"C:\Windows\SysWOW64\eps2003csp11v2.dll",
             r"C:\Windows\System32\eps2003csp11v2.dll",
             r"C:\Program Files (x86)\ePass2003-India-Auto\eps2003csp11v2.dll",
@@ -538,7 +554,10 @@ def find_innait_driver_path():
             r"C:\Windows\SysWOW64\InnaITSmartCardMiniDriver.dll",
             r"C:\Windows\SysWOW64\InnaITUSB.dll",
             r"C:\Windows\System32\InnaITPKCS11Driver.dll",
-            r"C:\Windows\System32\InnaITDSCLibrary.dll"
+            r"C:\Windows\System32\InnaITDSCLibrary.dll",
+            r"C:\Windows\System32\InnaITCSP.dll",
+            r"C:\Windows\System32\InnaITSmartCardMiniDriver.dll",
+            r"C:\Windows\System32\InnaITUSB.dll"
         ]
     return _pick_best_pkcs11_dll(candidates)
 
@@ -591,7 +610,12 @@ def find_proxkey_driver_path():
             r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\WDEvent.dll",
             r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\wdsafe3.dll",
             r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\wdkmgr.dll",
-            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDPKCS.dll"
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDPKCS.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\TokenMgr.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDCtr.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDEvent.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdsafe3.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdkmgr.dll"
         ]
     return _pick_best_pkcs11_dll(candidates)
 
@@ -3550,7 +3574,40 @@ class VisualPdfSignerApp:
         self.notebook.add(self.tab_tools, text=" 🛠️ PDF Tools ")
         self._build_tab_tools(self.tab_tools)
 
-        # 6. 📖 OCR & Edit Tab (Full Virtual Disp    def _build_tab_sign(self, parent):
+        # 6. 📖 OCR & Edit Tab (Full Virtual Display Interactive Text Editor - Pro Only)
+        self.tab_ocr_edit = ttk.Frame(self.notebook)
+        if LicenseManager.is_pro():
+            self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
+        self._build_tab_ocr_edit(self.tab_ocr_edit)
+
+        # 7. ℹ️ About & License
+        self.tab_about = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_about, text=" ℹ️ About & License ")
+        self._build_tab_about(self.tab_about)
+
+    def apply_feature_gating(self):
+        """Dynamically update UI features based on active license tier (Basic vs Pro)."""
+        is_pro = LicenseManager.is_pro()
+        tabs = self.notebook.tabs()
+        if is_pro:
+            if str(self.tab_ocr_edit) not in tabs:
+                about_idx = -1
+                for idx, t in enumerate(tabs):
+                    if t == str(self.tab_about):
+                        about_idx = idx
+                        break
+                if about_idx >= 0:
+                    self.notebook.insert(about_idx, self.tab_ocr_edit, text=" 📖 OCR & Edit ")
+                else:
+                    self.notebook.add(self.tab_ocr_edit, text=" 📖 OCR & Edit ")
+        else:
+            if str(self.tab_ocr_edit) in tabs:
+                self.notebook.forget(self.tab_ocr_edit)
+
+    # =========================================================================
+    # TAB 1: ✍️ SIGN PDF (Restored Classic Split Layout with Live Canvas)
+    # =========================================================================
+    def _build_tab_sign(self, parent):
         split = tk.Frame(parent, bg="#F1F5F9")
         split.pack(fill=tk.BOTH, expand=True)
 
