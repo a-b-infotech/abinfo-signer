@@ -467,36 +467,133 @@ class LicenseManager:
 # ==========================================
 # 1. CROSS-PLATFORM DRIVER MAPPING
 # ==========================================
-def find_epass_driver_path():
-    candidates = [
-        r"C:\Program Files (x86)\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
-        r"C:\Program Files\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
-        r"C:\Windows\System32\eps2003csp11v2.dll",
-        r"C:\Windows\SysWOW64\eps2003csp11v2.dll",
-        r"C:\Program Files\ePass2003-India-Auto\eps2003csp11v2.dll",
-        r"C:\Program Files (x86)\ePass2003-India-Auto\eps2003csp11v2.dll",
-        r"C:\Program Files\EnterSafe\ePass2003\eps2003csp11v2.dll",
-        r"C:\Program Files (x86)\EnterSafe\ePass2003\eps2003csp11v2.dll"
-    ]
+def _pick_best_pkcs11_dll(candidates):
+    """
+    Selects the best matching PKCS#11 driver DLL from candidate list.
+    First checks if the DLL exists and loads cleanly via pkcs11, then falls back to first existing.
+    """
     for p in candidates:
-        if os.path.exists(p):
+        if p and os.path.exists(p) and p.lower().endswith('.dll'):
+            try:
+                pkcs11.lib(p)
+                return p
+            except Exception:
+                pass
+    for p in candidates:
+        if p and os.path.exists(p) and p.lower().endswith('.dll'):
             return p
-    return r"C:\Windows\System32\eps2003csp11v2.dll"
+    return candidates[0] if candidates else ""
+
+def find_epass_driver_path():
+    is_64bit = sys.maxsize > 2**32
+    if is_64bit:
+        candidates = [
+            r"C:\Windows\System32\HYP2003csp11IND.dll",
+            r"C:\Windows\System32\HYP2003csp11IND_s.dll",
+            r"C:\Windows\System32\eps2003csp11v2.dll",
+            r"C:\Program Files (x86)\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
+            r"C:\Program Files\Professional Digisign Private Limited\ProdigiSignStore\Lib\windows\x64\eps2003csp11v2.dll",
+            r"C:\Windows\SysWOW64\HYP2003csp11IND.dll",
+            r"C:\Windows\SysWOW64\HYP2003csp11IND_s.dll",
+            r"C:\Windows\SysWOW64\eps2003csp11v2.dll",
+            r"C:\Program Files\ePass2003-India-Auto\eps2003csp11v2.dll",
+            r"C:\Program Files (x86)\ePass2003-India-Auto\eps2003csp11v2.dll",
+            r"C:\Program Files\EnterSafe\ePass2003\eps2003csp11v2.dll",
+            r"C:\Program Files (x86)\EnterSafe\ePass2003\eps2003csp11v2.dll"
+        ]
+    else:
+        candidates = [
+            r"C:\Windows\SysWOW64\HYP2003csp11IND.dll",
+            r"C:\Windows\SysWOW64\HYP2003csp11IND_s.dll",
+            r"C:\Windows\System32\HYP2003csp11IND.dll",
+            r"C:\Windows\SysWOW64\eps2003csp11v2.dll",
+            r"C:\Windows\System32\eps2003csp11v2.dll",
+            r"C:\Program Files (x86)\ePass2003-India-Auto\eps2003csp11v2.dll",
+            r"C:\Program Files\ePass2003-India-Auto\eps2003csp11v2.dll"
+        ]
+    return _pick_best_pkcs11_dll(candidates)
 
 def find_innait_driver_path():
-    candidates = [
-        r"C:\Windows\System32\InnaITPKCS11Driver.dll",
-        r"C:\Windows\SysWOW64\InnaITPKCS11Driver.dll",
-        r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC\InnaITPKCS11Driver.dll",
-        r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC\InnaITPKCS11Driver.dll",
-        r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC \InnaITPKCS11Driver.dll",
-        r"C:\Windows\System32\InnaITDSCLibrary.dll",
-        r"C:\Windows\SysWOW64\InnaITDSCLibrary.dll"
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return r"C:\Windows\System32\InnaITPKCS11Driver.dll"
+    is_64bit = sys.maxsize > 2**32
+    if is_64bit:
+        candidates = [
+            r"C:\Windows\System32\InnaITPKCS11Driver.dll",
+            r"C:\Windows\System32\InnaITDSCLibrary.dll",
+            r"C:\Windows\System32\InnaITCSP.dll",
+            r"C:\Windows\System32\InnaITSmartCardMiniDriver.dll",
+            r"C:\Windows\System32\InnaITUSB.dll",
+            r"C:\Windows\SysWOW64\InnaITPKCS11Driver.dll",
+            r"C:\Windows\SysWOW64\InnaITDSCLibrary.dll",
+            r"C:\Windows\SysWOW64\InnaITCSP.dll",
+            r"C:\Windows\SysWOW64\InnaITSmartCardMiniDriver.dll",
+            r"C:\Windows\SysWOW64\InnaITUSB.dll",
+            r"C:\Program Files (x86)\Precision Biometric\InnaIT\InnaITDSC\InnaITPKCS11Driver.dll",
+            r"C:\Program Files\Precision Biometric\InnaIT\InnaITDSC\InnaITPKCS11Driver.dll"
+        ]
+    else:
+        candidates = [
+            r"C:\Windows\SysWOW64\InnaITPKCS11Driver.dll",
+            r"C:\Windows\SysWOW64\InnaITDSCLibrary.dll",
+            r"C:\Windows\SysWOW64\InnaITCSP.dll",
+            r"C:\Windows\SysWOW64\InnaITSmartCardMiniDriver.dll",
+            r"C:\Windows\SysWOW64\InnaITUSB.dll",
+            r"C:\Windows\System32\InnaITPKCS11Driver.dll",
+            r"C:\Windows\System32\InnaITDSCLibrary.dll"
+        ]
+    return _pick_best_pkcs11_dll(candidates)
+
+def find_mtoken_driver_path():
+    is_64bit = sys.maxsize > 2**32
+    if is_64bit:
+        candidates = [
+            r"C:\Windows\System32\cryptoida_pkcs11.dll",
+            r"C:\Windows\System32\cryptoida_pkcs11_f2.dll",
+            r"C:\Windows\System32\cryptoida_pkcs11_f3.dll",
+            r"C:\Windows\SysWOW64\cryptoida_pkcs11.dll",
+            r"C:\Windows\SysWOW64\cryptoida_pkcs11_f2.dll",
+            r"C:\Windows\SysWOW64\cryptoida_pkcs11_f3.dll",
+            r"C:\Program Files (x86)\CryptoID\cryptoida_pkcs11.dll",
+            r"C:\Program Files (x86)\CryptoID\CryptoIDCertUtilityF3\cryptoida_pkcs11_f3.dll"
+        ]
+    else:
+        candidates = [
+            r"C:\Windows\SysWOW64\cryptoida_pkcs11.dll",
+            r"C:\Windows\SysWOW64\cryptoida_pkcs11_f2.dll",
+            r"C:\Windows\SysWOW64\cryptoida_pkcs11_f3.dll",
+            r"C:\Windows\System32\cryptoida_pkcs11.dll",
+            r"C:\Windows\System32\cryptoida_pkcs11_f2.dll",
+            r"C:\Windows\System32\cryptoida_pkcs11_f3.dll"
+        ]
+    return _pick_best_pkcs11_dll(candidates)
+
+def find_proxkey_driver_path():
+    is_64bit = sys.maxsize > 2**32
+    if is_64bit:
+        candidates = [
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDPKCS.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\TokenMgr.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDCtr.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDEvent.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdsafe3.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdkmgr.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\WDPKCS.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\TokenMgr.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\WDCtr.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\WDEvent.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\wdsafe3.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\wdkmgr.dll"
+        ]
+    else:
+        candidates = [
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\WDPKCS.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\TokenMgr.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\WDCtr.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\WDEvent.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\wdsafe3.dll",
+            r"C:\Windows\SysWOW64\Watchdata\PROXKey CSP India V3.0\wdkmgr.dll",
+            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\WDPKCS.dll"
+        ]
+    return _pick_best_pkcs11_dll(candidates)
 
 CUSTOM_DRIVERS_FILE = os.path.join(APP_DIR, "custom_drivers.json")
 
@@ -518,15 +615,15 @@ def save_custom_driver(name, path):
 def get_platform_drivers():
     drivers = {}
     if CURRENT_OS == 'Windows':
-        is_64bit = sys.maxsize > 2**32
-        p64 = r"C:\WINDOWS\system32\cryptoida_pkcs11.dll"
-        p32 = r"C:\WINDOWS\sysWOW64\cryptoida_pkcs11.dll"
-        mtoken = p64 if (is_64bit and os.path.exists(p64)) else p32
+        epass_driver = find_epass_driver_path()
+        proxkey_driver = find_proxkey_driver_path()
+        mtoken_driver = find_mtoken_driver_path()
         innait_driver = find_innait_driver_path()
 
-        drivers["ePass2003 Token"] = find_epass_driver_path()
-        drivers["ProxKey India"] = r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdpkcs.dll"
-        drivers["mToken / CryptoID"] = mtoken
+        drivers["ePass2003 / HyperPKI Token"] = epass_driver
+        drivers["ePass2003 Token"] = epass_driver
+        drivers["ProxKey India"] = proxkey_driver
+        drivers["mToken / CryptoID"] = mtoken_driver
         drivers["InnaIT / Precision Biometric Token"] = innait_driver
         drivers["InnaIT Token"] = innait_driver
         
