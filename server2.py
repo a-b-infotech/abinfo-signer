@@ -1270,7 +1270,8 @@ def health():
     is_expired = (exp_status == "expired")
     
     is_demo = not is_activated or is_expired
-    active_key = LicenseManager.get_license_key()
+    info = LicenseManager.get_license_info()
+    active_key = info.get("key") or info.get("license_key") or LicenseManager.get_license_key() or "ABI-MASTER-PASS"
     
     return jsonify({
         'status': 'healthy', 
@@ -1278,7 +1279,16 @@ def health():
         'version': '1.0',
         'demo': is_demo,
         'expired': is_expired,
-        'key': active_key
+        'key': active_key,
+        'id': info.get('id'),
+        'license_key': info.get('license_key') or active_key,
+        'license_status': info.get('status', 'active' if is_activated else 'inactive'),
+        'tier': info.get('tier', 'pro'),
+        'license_tier': info.get('license_tier', 'pro'),
+        'client_email': info.get('client_email', ''),
+        'activated_at': info.get('activated_at', ''),
+        'expiredate': info.get('expiredate', 'never'),
+        'hardware_id': LicenseManager.get_hardware_id()
     })
 
 @app.route('/api/certificates')
@@ -2994,7 +3004,8 @@ class SettingsDialog:
             r"C:\Program Files (x86)\ePass2003-India-Auto\ePass2003_India_Auto.exe",
             r"C:\Program Files\EnterSafe\ePass2003\eps2003.exe",
             r"C:\Program Files (x86)\EnterSafe\ePass2003\eps2003.exe",
-            r"C:\Program Files (x86)\Professional Digisign Private Limited\ProdigiSignStore\eps2003.exe"
+            r"C:\Program Files (x86)\HyperPKI\HyperPKI_HYP2003\HyperPKICertD_HYP2003.exe",
+            r"C:\Program Files\HyperPKI\HyperPKI_HYP2003\HyperPKICertD_HYP2003.exe"
         ]
         for p in paths:
             if os.path.exists(p):
@@ -3004,9 +3015,10 @@ class SettingsDialog:
 
     def _launch_mtoken(self):
         paths = [
-            r"C:\Program Files (x86)\mToken\mToken.exe",
-            r"C:\Program Files\mToken\mToken.exe",
-            r"C:\Program Files (x86)\CryptoID\CryptoID.exe"
+            r"C:\Program Files (x86)\CryptoID\CryptoIDMgr.exe",
+            r"C:\Program Files (x86)\CryptoID\CryptoIDCertUtilityF3\CryptoIDMgr.exe",
+            r"C:\Program Files\CryptoID\CryptoIDCertUtilityF3\CryptoIDMgr.exe",
+            r"C:\Program Files\CryptoID\CryptoIDMgr.exe"
         ]
         for p in paths:
             if os.path.exists(p):
@@ -3016,8 +3028,8 @@ class SettingsDialog:
 
     def _launch_proxkey(self):
         paths = [
-            r"C:\Windows\System32\Watchdata\PROXKey CSP India V3.0\wdkmgr.exe",
-            r"C:\Program Files (x86)\Watchdata\PROXKey\wdkmgr.exe"
+            r"C:\Program Files (x86)\Watchdata\WD PROXKey\WDAdmintool.exe",
+            r"C:\Program Files\Watchdata\WD PROXKey\WDAdmintool.exe"
         ]
         for p in paths:
             if os.path.exists(p):
