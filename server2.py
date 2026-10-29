@@ -3692,6 +3692,7 @@ class VisualPdfSignerApp:
 
         # Appearance Checkbox options (Name, Date, Reason, Address, Issuer, Green tick, Border)
         self.show_name_var = tk.BooleanVar(value=True)
+        self.show_org_var = tk.BooleanVar(value=True)
         self.show_date_var = tk.BooleanVar(value=True)
         self.show_reason_var = tk.BooleanVar(value=True)
         self.show_address_var = tk.BooleanVar(value=True)
