@@ -4444,13 +4444,21 @@ class VisualPdfSignerApp:
                         pass
                     self.txt_verify_report.insert(tk.END, f"• Signature Format: {subf}\n")
 
-                    # Cryptographic Integrity
+                    # Cryptographic Integrity (instant local hash verification, no network lag)
                     is_intact = False
                     try:
-                        val = validate_pdf_signature(sig)
+                        val = validate_pdf_signature(
+                            sig,
+                            signer_validation_context=ValidationContext(allow_fetching=False),
+                            skip_diff=True
+                        )
                         is_intact = getattr(val, 'intact', False)
-                    except Exception as ve:
-                        is_intact = getattr(val, 'intact', False) if 'val' in locals() and hasattr(val, 'intact') else False
+                    except Exception:
+                        try:
+                            st = sig.compute_integrity_info(skip_diff=True)
+                            is_intact = getattr(st, 'intact', False)
+                        except Exception:
+                            is_intact = False
 
                     if is_intact:
                         self.txt_verify_report.insert(tk.END, "• Document Integrity: ✓ INTACT & UNALTERED (Bytes match cryptographic hash)\n")
@@ -5170,30 +5178,129 @@ class VisualPdfSignerApp:
         messagebox.showerror("Signing Error", f"Could not sign document:\n{err}")
 
     def _start_bulk_signing_process(self, is_token, pin, cert_alias, pfx_path, pfx_pass):
-        pdfs = self.bulk_pdf_files
+        pdfs = list(self.bulk_pdf_files)
         out_dir = self.bulk_out_dir
-        areas = list(self.signature_areas)
-        self.bulk_mode = False
+        base_areas = list(self.signature_areas)
+        sign_all_pages = self.sign_all_pages_var.get()
 
-        self.lbl_sign_status.config(text=f"Batch signing {len(pdfs)} documents...", fg="#0284C7")
+        if not pdfs:
+            messagebox.showerror("Error", "No PDF files loaded for bulk signing.")
+            return
+        if not base_areas:
+            messagebox.showwarning("Warning", "Please draw a signature box on the sample document first.")
+            return
+
         self.btn_sign_doc.config(state=tk.DISABLED)
+        self.lbl_sign_status.config(text=f"Batch signing {len(pdfs)} documents in progress...", fg="#0284C7")
 
         def bulk_thread():
             count = 0
-            for p in pdfs:
-                fname = os.path.basename(p)
-                out_p = os.path.join(out_dir, f"signed_{fname}")
-                try:
-                    self._signing_worker(p, out_p, is_token, pin, cert_alias, pfx_path, pfx_pass, areas)
-                    count += 1
-                except Exception as e:
-                    logger.error(f"Bulk sign error on {fname}: {e}")
+            errors = []
+            try:
+                driver_path = DRIVER_MAP.get(self.driver_var.get())
+                reason = self.sign_reason_var.get().strip()
+                location = self.sign_address_var.get().strip()
+                contact = self.sign_contact_var.get().strip()
+                tsa = TSA_URL if "DigiCert" in self.sign_tsa_var.get() else None
+                custom_logo = self.sign_custom_logo_path.get() if (self.sign_include_logo.get() and self.sign_custom_logo_path.get()) else None
+
+                appearance_opts = {
+                    'show_name': self.show_name_var.get(),
+                    'show_date': self.show_date_var.get(),
+                    'show_reason': self.show_reason_var.get(),
+                    'show_address': self.show_address_var.get(),
+                    'show_issuer': self.show_issuer_var.get(),
+                    'show_tick': self.show_tick_var.get(),
+                    'show_border': self.show_border_var.get(),
+                }
+
+                def process_batch(signer, cert_parsed):
+                    nonlocal count
+                    for idx, p in enumerate(pdfs):
+                        fname = os.path.basename(p)
+                        self.root.after(0, lambda i=idx, fn=fname: self.lbl_sign_status.config(
+                            text=f"Signing ({i+1}/{len(pdfs)}): {fn}...", fg="#0284C7"
+                        ))
+                        out_p = os.path.join(out_dir, f"signed_{fname}")
+                        try:
+                            with open(p, 'rb') as f:
+                                pdf_data = f.read()
+
+                            if sign_all_pages:
+                                chk_doc = fitz.open(p)
+                                doc_pages = len(chk_doc)
+                                chk_doc.close()
+                                file_areas = []
+                                for p_no in range(doc_pages):
+                                    for a in base_areas:
+                                        na = dict(a)
+                                        na['page'] = p_no
+                                        file_areas.append(na)
+                            else:
+                                file_areas = list(base_areas)
+
+                            visual_pdf = draw_reportlab_layer(
+                                pdf_data, file_areas, cert_parsed, reason, location, contact,
+                                logo_path=custom_logo, appearance_opts=appearance_opts
+                            )
+                            self._pyhanko_sign_incremental(visual_pdf, out_p, signer, file_areas, tsa)
+
+                            if self.sign_protect_pdf.get():
+                                pwd = self.sign_pdf_password.get().strip()
+                                if pwd:
+                                    try:
+                                        d_enc = fitz.open(out_p)
+                                        tmp_enc = out_p + ".enc.pdf"
+                                        d_enc.save(tmp_enc, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw=pwd, owner_pw=pwd)
+                                        d_enc.close()
+                                        os.replace(tmp_enc, out_p)
+                                    except Exception:
+                                        pass
+
+                            count += 1
+                        except Exception as fe:
+                            logger.error(f"Bulk sign error on {fname}: {fe}")
+                            errors.append(f"{fname}: {fe}")
+
+                if is_token:
+                    lib = pkcs11.lib(driver_path)
+                    token = None
+                    for slot in lib.get_slots(token_present=True):
+                        try: token = slot.get_token(); break
+                        except Exception: continue
+                    if not token: raise ValueError("Hardware token not detected. Ensure USB is inserted.")
+
+                    with token.open(user_pin=pin) as session:
+                        cert_id, cert_parsed = None, None
+                        for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
+                            c = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
+                            if str(c.serial_number) == str(cert_alias):
+                                cert_id, cert_parsed = obj[pkcs11.Attribute.ID], c; break
+                        if not cert_id: raise ValueError("Certificate not found in token.")
+                        signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
+                        process_batch(signer, cert_parsed)
+                else:
+                    signer, cert_parsed = load_pfx_certificate(pfx_path, pfx_pass)
+                    process_batch(signer, cert_parsed)
+
+            except Exception as e:
+                logger.error(f"Bulk signing failure: {e}")
+                self.root.after(0, lambda err=str(e): messagebox.showerror("Bulk Signing Error", f"Batch signing stopped:\n{err}"))
 
             def on_bulk_done():
-                self.btn_sign_doc.config(state=tk.NORMAL, text="🚀 SIGN & SAVE PDF DOCUMENT")
-                self.lbl_sign_status.config(text=f"✓ Batch signing complete: {count}/{len(pdfs)} documents signed.", fg="#047857")
+                self.btn_sign_doc.config(state=tk.NORMAL, text="🚀 SIGN & SAVE PDF DOCUMENT", style="Primary3D.TButton")
                 self.bulk_mode = False
-                messagebox.showinfo("Batch Complete", f"Successfully batch signed {count} / {len(pdfs)} PDFs into:\n{out_dir}")
+                self.bulk_pdf_files = []
+                self.single_pdf_path_var.set("")
+                if errors:
+                    self.lbl_sign_status.config(text=f"Batch completed: {count}/{len(pdfs)} signed. {len(errors)} error(s).", fg="#DC2626")
+                    messagebox.showwarning(
+                        "Batch Completed with Errors",
+                        f"Successfully signed: {count}/{len(pdfs)} PDFs\nSaved in:\n{out_dir}\n\nErrors encountered:\n" + "\n".join(errors[:5])
+                    )
+                else:
+                    self.lbl_sign_status.config(text=f"✓ Batch signing complete: {count}/{len(pdfs)} documents signed.", fg="#047857")
+                    messagebox.showinfo("Batch Complete", f"Successfully batch signed {count} / {len(pdfs)} PDFs into:\n{out_dir}")
             self.root.after(0, on_bulk_done)
 
         threading.Thread(target=bulk_thread, daemon=True).start()
