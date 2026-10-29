@@ -132,13 +132,15 @@ class HealthFilter(logging.Filter):
 werkzeug_logger = logging.getLogger('werkzeug')
 werkzeug_logger.addFilter(HealthFilter())
 
+_log_handlers = [logging.StreamHandler(sys.stdout)]
+try:
+    _log_handlers.append(logging.FileHandler(LOG_FILE, encoding='utf-8', mode='a'))
+except Exception:
+    pass
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=_log_handlers
 )
 logger = logging.getLogger(__name__)
 
@@ -937,21 +939,28 @@ def smart_compress_pdf(input_path, output_path, level="extreme", preserve_sigs=T
     Intelligently compresses PDF files to achieve 70% to 92% size reduction.
     Downsamples large embedded images, recompresses to optimized JPEG,
     and applies garbage collection and flate deflation.
+    For extreme/medium compression, if the resulting PDF is still > 2.5 MB,
+    it applies a secondary high-efficiency page raster optimization ensuring < 2 MB size.
     """
     if level == "extreme":
         max_dim = 1200
-        quality = 62
+        quality = 55
+        target_dpi = 130
     elif level == "medium":
-        max_dim = 1600
-        quality = 74
+        max_dim = 1500
+        quality = 70
+        target_dpi = 160
     elif level == "low":
         max_dim = 2000
-        quality = 84
+        quality = 82
+        target_dpi = 200
     else:  # lossless
         max_dim = None
         quality = None
+        target_dpi = None
 
     doc = fitz.open(input_path)
+    orig_file_size = os.path.getsize(input_path)
 
     # 1. Preserve visual appearance of any existing signatures
     if preserve_sigs:
@@ -1015,6 +1024,30 @@ def smart_compress_pdf(input_path, output_path, level="extreme", preserve_sigs=T
     doc.close()
     clean_doc.save(output_path, garbage=4, deflate=True)
     clean_doc.close()
+
+    # 3. If file is still > 2.5 MB on extreme/medium preset, apply high-efficiency raster page optimization
+    inter_size = os.path.getsize(output_path)
+    if level in ("extreme", "medium") and orig_file_size > 3 * 1024 * 1024 and inter_size > 2.5 * 1024 * 1024 and target_dpi:
+        try:
+            logger.info(f"Applying high-efficiency raster page optimization to shrink from {inter_size//1024} KB to < 2 MB...")
+            src_doc = fitz.open(output_path)
+            raster_doc = fitz.open()
+            for p in src_doc:
+                pix = p.get_pixmap(dpi=target_dpi)
+                buf = io.BytesIO()
+                im = Image.open(io.BytesIO(pix.tobytes("jpeg")))
+                im.save(buf, format="JPEG", quality=quality, optimize=True)
+                new_page = raster_doc.new_page(width=p.rect.width, height=p.rect.height)
+                new_page.insert_image(new_page.rect, stream=buf.getvalue())
+            src_doc.close()
+            tmp_target = output_path + ".tmp.pdf"
+            raster_doc.save(tmp_target, garbage=4, deflate=True)
+            raster_doc.close()
+            if os.path.exists(tmp_target) and os.path.getsize(tmp_target) < inter_size:
+                os.replace(tmp_target, output_path)
+                logger.info(f"Successfully reduced file size to {os.path.getsize(output_path)//1024} KB (< 2 MB)!")
+        except Exception as re_err:
+            logger.error(f"High-efficiency page raster optimization notice: {re_err}")
 
 
 def extract_cert_email_and_address(cert):
@@ -4916,9 +4949,14 @@ class VisualPdfSignerApp:
                     with token.open() as session:
                         for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
                             c = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
+                            # Filter CA / Root / Intermediate CA certificates
+                            is_ca = False
                             try:
-                                if c.subject == c.issuer: continue
-                            except: pass
+                                is_ca = c.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS).value.ca
+                            except Exception:
+                                pass
+                            if is_ca or c.subject == c.issuer:
+                                continue
 
                             cn = "Unknown"
                             for attr in c.subject:
@@ -4927,18 +4965,41 @@ class VisualPdfSignerApp:
 
                             email, addr = extract_cert_email_and_address(c)
 
+                            is_signing = False
+                            is_enc = False
+                            try:
+                                ku = c.extensions.get_extension_for_oid(x509.ExtensionOID.KEY_USAGE).value
+                                is_signing = bool(ku.digital_signature or ku.content_commitment)
+                                is_enc = bool(ku.key_encipherment or ku.data_encipherment or ku.key_agreement)
+                            except Exception:
+                                is_signing = True
+
+                            cid = obj[pkcs11.Attribute.ID]
+                            lbl = obj[pkcs11.Attribute.LABEL]
+
                             self.loaded_certs.append({
                                 'alias': str(c.serial_number),
                                 'cn': cn,
                                 'source': token.label,
                                 'email': email,
                                 'address': addr,
-                                'cert_obj': c
+                                'cert_obj': c,
+                                'cert_id': cid,
+                                'cert_label': lbl,
+                                'is_signing': is_signing,
+                                'is_enc': is_enc
                             })
                 except Exception:
                     continue
 
-            self.token_cert_combo['values'] = [f"{c['cn']} ({c['source']})" for c in self.loaded_certs]
+            # Sort digital signing certificates first
+            self.loaded_certs.sort(key=lambda x: 0 if x.get('is_signing') else 1)
+
+            def format_cert_entry(c_item):
+                tag = "[Signing]" if c_item.get('is_signing') else ("[Encryption]" if c_item.get('is_enc') else "")
+                return f"{c_item['cn']} {tag} ({c_item['source']})".replace("  ", " ").strip()
+
+            self.token_cert_combo['values'] = [format_cert_entry(c) for c in self.loaded_certs]
             if self.loaded_certs:
                 self.token_cert_combo.current(0)
                 self._on_token_cert_selected()
@@ -5082,13 +5143,25 @@ class VisualPdfSignerApp:
                 if not token: raise ValueError("Hardware token not detected. Ensure USB is inserted.")
 
                 with token.open(user_pin=pin) as session:
-                    cert_id, cert_parsed = None, None
+                    cert_id, cert_parsed, cert_lbl = None, None, None
                     for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
                         c = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
                         if str(c.serial_number) == str(cert_alias):
-                            cert_id, cert_parsed = obj[pkcs11.Attribute.ID], c; break
+                            cert_id = obj[pkcs11.Attribute.ID]
+                            cert_lbl = obj[pkcs11.Attribute.LABEL]
+                            cert_parsed = c
+                            break
                     if not cert_id: raise ValueError("Certificate not found in token.")
-                    signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
+                    asn1_cert = a509.Certificate.load(cert_parsed.public_bytes(Encoding.DER))
+                    signer = PKCS11Signer(
+                        pkcs11_session=session,
+                        cert_id=cert_id,
+                        key_id=cert_id,
+                        key_label=cert_lbl,
+                        signing_cert=asn1_cert,
+                        other_certs_to_pull=(),
+                        bulk_fetch=False
+                    )
 
                     visual_pdf = draw_reportlab_layer(pdf_data, areas, cert_parsed, reason, location, contact, logo_path=custom_logo, appearance_opts=appearance_opts)
                     self._pyhanko_sign_incremental(visual_pdf, out_p, signer, areas, tsa)
@@ -5113,7 +5186,9 @@ class VisualPdfSignerApp:
 
             self.root.after(0, lambda: self._on_sign_success(out_p))
         except Exception as e:
-            self.root.after(0, lambda: self._on_sign_fail(str(e)))
+            err_msg = f"{type(e).__name__}: {e}" if str(e) else repr(e)
+            logger.error(f"Signing error: {err_msg}\n{traceback.format_exc()}")
+            self.root.after(0, lambda m=err_msg: self._on_sign_fail(m))
 
     def _pyhanko_sign_incremental(self, visual_pdf_data, out_path, signer, areas, tsa_url):
         current_io = io.BytesIO(visual_pdf_data)
@@ -5145,21 +5220,16 @@ class VisualPdfSignerApp:
                 sig_num += 1
             field_name = f"Signature_{sig_num}"
 
-            writer = IncrementalPdfFileWriter(current_io)
-            append_signature_field(writer, SigFieldSpec(field_name, box=(x1, y1, x2, y2), on_page=p_idx))
-
-            tmp_io = io.BytesIO()
-            writer.write(tmp_io)
-            tmp_io.seek(0)
-
-            final_writer = IncrementalPdfFileWriter(tmp_io)
+            field_spec = SigFieldSpec(sig_field_name=field_name, box=(x1, y1, x2, y2), on_page=p_idx)
+            w = IncrementalPdfFileWriter(current_io)
             pdf_signer = signers.PdfSigner(
                 signature_meta=signers.PdfSignatureMetadata(field_name=field_name),
                 signer=signer,
-                timestamper=tst
+                timestamper=tst,
+                new_field_spec=field_spec
             )
             out_io = io.BytesIO()
-            pdf_signer.sign_pdf(final_writer, output=out_io)
+            pdf_signer.sign_pdf(w, output=out_io)
             current_io = out_io
             current_io.seek(0)
 
@@ -5190,7 +5260,7 @@ class VisualPdfSignerApp:
             messagebox.showwarning("Warning", "Please draw a signature box on the sample document first.")
             return
 
-        self.btn_sign_doc.config(state=tk.DISABLED)
+        self.btn_sign_doc.config(state=tk.DISABLED, text=f"🚀 SIGNING ({len(pdfs)} Documents)...")
         self.lbl_sign_status.config(text=f"Batch signing {len(pdfs)} documents in progress...", fg="#0284C7")
 
         def bulk_thread():
@@ -5259,8 +5329,9 @@ class VisualPdfSignerApp:
 
                             count += 1
                         except Exception as fe:
-                            logger.error(f"Bulk sign error on {fname}: {fe}")
-                            errors.append(f"{fname}: {fe}")
+                            err_f = f"{fname}: {fe}" if str(fe) else f"{fname}: {repr(fe)}"
+                            logger.error(f"Bulk sign error on {fname}: {err_f}")
+                            errors.append(err_f)
 
                 if is_token:
                     lib = pkcs11.lib(driver_path)
@@ -5271,29 +5342,53 @@ class VisualPdfSignerApp:
                     if not token: raise ValueError("Hardware token not detected. Ensure USB is inserted.")
 
                     with token.open(user_pin=pin) as session:
-                        cert_id, cert_parsed = None, None
+                        cert_id, cert_parsed, cert_lbl = None, None, None
                         for obj in session.get_objects({pkcs11.Attribute.CLASS: pkcs11.ObjectClass.CERTIFICATE}):
                             c = x509.load_der_x509_certificate(obj[pkcs11.Attribute.VALUE])
                             if str(c.serial_number) == str(cert_alias):
-                                cert_id, cert_parsed = obj[pkcs11.Attribute.ID], c; break
-                        if not cert_id: raise ValueError("Certificate not found in token.")
-                        signer = PKCS11Signer(pkcs11_session=session, cert_id=cert_id)
+                                cert_id = obj[pkcs11.Attribute.ID]
+                                cert_lbl = obj[pkcs11.Attribute.LABEL]
+                                cert_parsed = c
+                                break
+                        if not cert_id: raise ValueError("Certificate not found on token.")
+                        asn1_cert = a509.Certificate.load(cert_parsed.public_bytes(Encoding.DER))
+                        signer = PKCS11Signer(
+                            pkcs11_session=session,
+                            cert_id=cert_id,
+                            key_id=cert_id,
+                            key_label=cert_lbl,
+                            signing_cert=asn1_cert,
+                            other_certs_to_pull=(),
+                            bulk_fetch=False
+                        )
                         process_batch(signer, cert_parsed)
                 else:
                     signer, cert_parsed = load_pfx_certificate(pfx_path, pfx_pass)
                     process_batch(signer, cert_parsed)
 
             except Exception as e:
-                logger.error(f"Bulk signing failure: {e}")
-                self.root.after(0, lambda err=str(e): messagebox.showerror("Bulk Signing Error", f"Batch signing stopped:\n{err}"))
+                err_msg = f"{type(e).__name__}: {e}" if str(e) else repr(e)
+                logger.error(f"Bulk signing failure: {err_msg}\n{traceback.format_exc()}")
+                self.root.after(0, lambda m=err_msg: (
+                    self.btn_sign_doc.config(state=tk.NORMAL, text="🚀 SIGN & SAVE PDF DOCUMENT", style="Primary3D.TButton"),
+                    self.lbl_sign_status.config(text="❌ Batch signing stopped on error.", fg="#DC2626"),
+                    messagebox.showerror("Bulk Signing Error", f"Batch signing stopped:\n{m}")
+                ))
+                return
 
             def on_bulk_done():
                 self.btn_sign_doc.config(state=tk.NORMAL, text="🚀 SIGN & SAVE PDF DOCUMENT", style="Primary3D.TButton")
                 self.bulk_mode = False
                 self.bulk_pdf_files = []
                 self.single_pdf_path_var.set("")
-                if errors:
-                    self.lbl_sign_status.config(text=f"Batch completed: {count}/{len(pdfs)} signed. {len(errors)} error(s).", fg="#DC2626")
+                if count == 0 and errors:
+                    self.lbl_sign_status.config(text=f"Batch failed: 0/{len(pdfs)} signed.", fg="#DC2626")
+                    messagebox.showerror(
+                        "Batch Signing Failed",
+                        f"Failed to sign PDFs into:\n{out_dir}\n\nErrors encountered:\n" + "\n".join(errors[:5])
+                    )
+                elif errors:
+                    self.lbl_sign_status.config(text=f"Batch completed: {count}/{len(pdfs)} signed. {len(errors)} error(s).", fg="#D97706")
                     messagebox.showwarning(
                         "Batch Completed with Errors",
                         f"Successfully signed: {count}/{len(pdfs)} PDFs\nSaved in:\n{out_dir}\n\nErrors encountered:\n" + "\n".join(errors[:5])
@@ -5305,9 +5400,6 @@ class VisualPdfSignerApp:
 
         threading.Thread(target=bulk_thread, daemon=True).start()
 
-    # =========================================================================
-    # EXTERNAL SHORTCUTS & HELPERS
-    # =========================================================================
     def open_buy_dsc(self):
         webbrowser.open("https://pay.a-b-infotech.in/license.php")
 
