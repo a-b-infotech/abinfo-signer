@@ -95,6 +95,7 @@ try:
     from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
     from pyhanko.sign import signers
     from pyhanko.sign.fields import SigFieldSpec, append_signature_field
+    from pyhanko.stamp import StaticStampStyle
     from pyhanko.sign.pkcs11 import PKCS11Signer
     from pyhanko.sign.timestamps import HTTPTimeStamper
     from pyhanko.sign.validation import validate_pdf_signature
@@ -108,6 +109,97 @@ try:
 except ImportError:
     print("Missing cryptography libraries: pip install PyPDF2 cryptography python-pkcs11 pyhanko[pkcs11] reportlab requests")
     sys.exit(1)
+
+# -------------------------------------------------------------
+# SAFE MONKEY-PATCH: Support PDF files with existing signatures
+# where /T field names are ByteStringObjects instead of str
+# -------------------------------------------------------------
+try:
+    from pyhanko.sign import fields as _pyhanko_fields
+    _orig_enumerate_sig_fields_in = _pyhanko_fields.enumerate_sig_fields_in
+
+    def _safe_enumerate_sig_fields_in(
+        field_list,
+        filled_status=None,
+        with_name=None,
+        parent_name="",
+        parents=None,
+        *,
+        refs_seen,
+    ):
+        if not isinstance(field_list, generic.ArrayObject):
+            return
+
+        parents = parents or ()
+        for field_ref in field_list:
+            if not isinstance(field_ref, generic.IndirectObject):
+                continue
+            if field_ref.reference in refs_seen:
+                raise pdf_utils.misc.PdfReadError("Circular reference in form tree")
+
+            field = field_ref.get_object()
+            if not isinstance(field, generic.DictionaryObject):
+                continue
+            try:
+                raw_t = field['/T']
+                if isinstance(raw_t, (bytes, generic.ByteStringObject)):
+                    try:
+                        field_name = str(raw_t.decode('utf-8', errors='replace'))
+                    except Exception:
+                        field_name = str(raw_t)
+                else:
+                    field_name = str(raw_t)
+            except KeyError:
+                continue
+
+            fq_name = (
+                field_name
+                if not parent_name
+                else ("%s.%s" % (parent_name, field_name))
+            )
+            explicitly_requested = with_name is not None and str(fq_name) == str(with_name)
+            child_requested = explicitly_requested or (
+                with_name is not None and str(with_name).startswith(str(fq_name))
+            )
+            current_path = (field,) + parents
+            for parent_field in current_path:
+                try:
+                    field_type = parent_field['/FT']
+                    break
+                except KeyError:
+                    continue
+            else:
+                field_type = None
+
+            if field_type == '/Sig':
+                field_value = field.get('/V')
+                filled = field_value is not None
+                status_check = filled_status is None or filled == filled_status
+                name_check = with_name is None or explicitly_requested
+                if status_check and name_check:
+                    yield fq_name, field_value, field_ref
+            elif explicitly_requested:
+                raise _pyhanko_fields.SigningError(
+                    'Field with name %s exists but is not a signature field' % fq_name
+                )
+
+            if with_name is None or (child_requested and not explicitly_requested):
+                try:
+                    yield from _safe_enumerate_sig_fields_in(
+                        field['/Kids'],
+                        parent_name=fq_name,
+                        parents=current_path,
+                        with_name=with_name,
+                        filled_status=filled_status,
+                        refs_seen=refs_seen | {field_ref.reference},
+                    )
+                except KeyError:
+                    continue
+
+    _pyhanko_fields.enumerate_sig_fields_in = _safe_enumerate_sig_fields_in
+    logger.info("Successfully patched pyHanko enumerate_sig_fields_in for multi-signature compatibility.")
+except Exception as patch_e:
+    logger.warning(f"Could not apply pyHanko multi-signature patch: {patch_e}")
 
 # ==========================================
 # 0. DIRECTORIES & LOGGING SETUP
@@ -1205,6 +1297,54 @@ def get_rapid_ocr_engine():
             logger.warning(f"Could not initialize RapidOCR: {e}")
     return _RAPID_OCR_ENGINE
 
+def build_signature_stamp_lines(cert, reason="", location="", contact="", appearance_opts=None):
+    """Build clean structured text lines for signature stamp with visual hierarchy."""
+    if appearance_opts is None:
+        appearance_opts = {}
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    signer_cn = "Authorized Signer"
+    issuer_cn = "N/A"
+    if cert:
+        try:
+            for attr in cert.subject:
+                if attr.oid == x509.NameOID.COMMON_NAME:
+                    signer_cn = attr.value; break
+        except Exception:
+            pass
+        try:
+            for attr in cert.issuer:
+                if attr.oid == x509.NameOID.COMMON_NAME:
+                    issuer_cn = attr.value; break
+        except Exception:
+            pass
+
+    lines = []
+    # Header & Name (Always included when show_name is True)
+    if appearance_opts.get('show_name', True):
+        lines.append(("Digitally signed by", False, (0.15, 0.25, 0.45)))
+        lines.append((signer_cn, True, (0.05, 0.12, 0.32)))
+    else:
+        lines.append(("Digitally Signed", True, (0.05, 0.12, 0.32)))
+
+    if appearance_opts.get('show_issuer', False) and issuer_cn != "N/A":
+        lines.append((f"Issuer: {issuer_cn}", False, (0.2, 0.25, 0.3)))
+
+    if appearance_opts.get('show_reason', True) and reason:
+        lines.append((f"Reason: {reason}", False, (0.2, 0.25, 0.3)))
+
+    if appearance_opts.get('show_address', True) and location:
+        lines.append((f"Location: {location}", False, (0.2, 0.25, 0.3)))
+
+    if contact:
+        lines.append((f"Contact: {contact}", False, (0.2, 0.25, 0.3)))
+
+    if appearance_opts.get('show_date', True):
+        d_str = datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')
+        lines.append((f"Date: {d_str}", False, (0.2, 0.25, 0.3)))
+
+    return lines
+
 def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None, appearance_opts=None):
     """
     Draw visual signature stamp directly and incrementally on the PDF using PyMuPDF,
@@ -1212,12 +1352,8 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
     """
     if appearance_opts is None:
         appearance_opts = {
-            'show_name': True,
-            'show_date': True,
-            'show_reason': True,
-            'show_address': True,
-            'show_issuer': False,
-            'show_tick': True,
+            'show_name': True, 'show_date': True, 'show_reason': True,
+            'show_address': True, 'show_issuer': False, 'show_tick': True,
             'show_border': False
         }
 
@@ -1228,46 +1364,7 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
 
     try:
         doc = fitz.open(tf_name)
-        subj = cert.subject.rfc4514_string() if cert else ""
-        def get_f(k):
-            for p in subj.split(','):
-                if p.strip().startswith(k + '='):
-                    return p.split('=', 1)[1].strip()
-            return "N/A"
-
-        ist = timezone(timedelta(hours=5, minutes=30))
-        signer_cn = get_f('CN') if cert else "Authorized Signer"
-
-        lines = []
-        if appearance_opts.get('show_name', True):
-            lines.append("Digitally signed by:")
-            lines.append(f"Name:- {signer_cn}")
-
-        if appearance_opts.get('show_issuer', False):
-            issuer_cn = "N/A"
-            if cert:
-                try:
-                    for attr in cert.issuer:
-                        if attr.oid == x509.NameOID.COMMON_NAME:
-                            issuer_cn = attr.value; break
-                except Exception:
-                    pass
-            lines.append(f"Issuer:- {issuer_cn}")
-
-        if appearance_opts.get('show_reason', True) and reason:
-            lines.append(f"Reason:- {reason}")
-        if appearance_opts.get('show_address', True) and location:
-            lines.append(f"Address:- {location}")
-        if contact:
-            lines.append(f"Contact:- {contact}")
-
-        if appearance_opts.get('show_date', True):
-            lines.append(f"Date:- {datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')}")
-
-        if not lines:
-            lines = [f"Signed by {signer_cn}"]
-
-        full_text = "\n".join(lines)
+        lines = build_signature_stamp_lines(cert, reason=reason, location=location, contact=contact, appearance_opts=appearance_opts)
 
         for a in areas:
             p_idx = int(a.get('page', 0))
@@ -1282,55 +1379,69 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             ah = float(a['height'])
             ay_mupdf = ph - (ay_pdf + ah)
 
-            # 1. Outer Box Border (only if show_border is True)
+            # 1. Outer Box Border (crisp, professional 1px border)
             if appearance_opts.get('show_border', False):
-                rect = fitz.Rect(ax, ay_mupdf, ax + aw, ay_mupdf + ah)
-                page.draw_rect(rect, color=(0.1, 0.2, 0.3), width=1.2)
+                page.draw_rect(
+                    fitz.Rect(ax, ay_mupdf, ax + aw, ay_mupdf + ah),
+                    color=(0.12, 0.23, 0.44),
+                    width=1.0
+                )
 
-            # 2. Custom Logo (if provided)
+            # 2. Left Logo / Emblem
             has_logo = False
             logo_w = 0.0
-            if logo_path and os.path.exists(logo_path):
+            eff_logo = logo_path if (logo_path and os.path.exists(logo_path)) else None
+            if eff_logo:
                 try:
-                    logo_dim = min(aw * 0.28, ah * 0.82)
+                    logo_dim = min(aw * 0.25, ah * 0.76)
                     logo_w = logo_dim
-                    logo_h = logo_dim
-                    logo_x = ax + (aw * 0.03)
-                    logo_y = ay_mupdf + (ah - logo_h) / 2
-                    page.insert_image(fitz.Rect(logo_x, logo_y, logo_x + logo_w, logo_y + logo_h), filename=logo_path)
+                    logo_x = ax + 5
+                    logo_y = ay_mupdf + (ah - logo_dim) / 2
+                    page.insert_image(fitz.Rect(logo_x, logo_y, logo_x + logo_dim, logo_y + logo_dim), filename=eff_logo)
                     has_logo = True
                 except Exception as e:
                     logger.warning(f"PyMuPDF custom logo overlay error: {e}")
 
-            # 3. Background Green Checkmark Watermark (only if show_tick is True)
+            # 3. Soft Background Green Checkmark Watermark
             if appearance_opts.get('show_tick', True):
-                tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
-                cx = ax + tick_offset_x + ((aw - tick_offset_x) / 2)
-                cy = ay_mupdf + (ah / 2)
+                tick_offset_x = (logo_w + 6) if has_logo else 0
+                cx = ax + tick_offset_x + ((aw - tick_offset_x) * 0.5)
+                cy = ay_mupdf + (ah * 0.5)
                 s = min(aw - tick_offset_x, ah) * 0.35
                 p1 = fitz.Point(cx - s, cy)
                 p2 = fitz.Point(cx - s * 0.2, cy + s * 0.6)
                 p3 = fitz.Point(cx + s * 0.8, cy - s * 0.8)
-                page.draw_polyline([p1, p2, p3], color=(0.2, 0.7, 0.4), width=max(1.5, aw * 0.045), lineJoin=1)
+                page.draw_polyline([p1, p2, p3], color=(0.15, 0.65, 0.35), width=max(1.8, aw * 0.035), lineJoin=1)
 
-            # 4. Text Information
-            left_pad = (aw * 0.03) + (logo_w + (aw * 0.04) if has_logo else 0)
-            right_pad = aw * 0.03
-            tx = ax + left_pad
-            ty = ay_mupdf + (ah * 0.06)
-            tw = max(aw - left_pad - right_pad, 20.0)
-            th = max(ah - (ah * 0.12), 10.0)
+            # 4. Dynamic Auto-Fitting Typography
+            left_pad = (logo_w + 8) if has_logo else 6
+            right_pad = 5
+            top_pad = 3
+            bottom_pad = 3
+            avail_w = max(aw - left_pad - right_pad, 20.0)
+            avail_h = max(ah - top_pad - bottom_pad, 10.0)
 
-            f_size = min(tw / (max(len(l) for l in lines) * 0.55), th / (len(lines) * 1.25), 11.0)
-            f_size = max(f_size, 5.5)
+            n = len(lines)
+            max_len = max(len(txt) for txt, _, _ in lines) if lines else 1
+            calc_f = min(avail_h / (n * 1.18), avail_w / (max_len * 0.52), 9.0)
+            f_size = max(calc_f, 3.8)
+            spacing = f_size * 1.16
 
-            page.insert_textbox(
-                fitz.Rect(tx, ty, tx + tw, ty + th),
-                full_text,
-                fontsize=f_size,
-                fontname="helv",
-                color=(0.05, 0.1, 0.15)
-            )
+            total_h = n * spacing
+            cur_y = ay_mupdf + (ah - total_h) / 2 + f_size * 0.85
+
+            for txt, is_bold, col in lines:
+                render_txt = txt
+                while len(render_txt) > 4 and (len(render_txt) * f_size * 0.52) > avail_w:
+                    render_txt = render_txt[:-4] + "..."
+                page.insert_text(
+                    fitz.Point(ax + left_pad, cur_y),
+                    render_txt,
+                    fontsize=f_size * (1.08 if is_bold else 0.96),
+                    fontname="helv" if not is_bold else "hebo",
+                    color=col
+                )
+                cur_y += spacing
 
         doc.save(tf_name, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         doc.close()
@@ -1352,53 +1463,12 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
 
     if appearance_opts is None:
         appearance_opts = {
-            'show_name': True,
-            'show_date': True,
-            'show_reason': True,
-            'show_address': True,
-            'show_issuer': False,
-            'show_tick': True,
+            'show_name': True, 'show_date': True, 'show_reason': True,
+            'show_address': True, 'show_issuer': False, 'show_tick': True,
             'show_border': False
         }
 
-    subj = cert.subject.rfc4514_string() if cert else ""
-    def get_f(k):
-        for p in subj.split(','):
-            if p.strip().startswith(k + '='):
-                return p.split('=', 1)[1].strip()
-        return "N/A"
-
-    ist = timezone(timedelta(hours=5, minutes=30))
-    signer_cn = get_f('CN') if cert else "Authorized Signer"
-
-    lines = []
-    if appearance_opts.get('show_name', True):
-        lines.append("Digitally signed by:")
-        lines.append(f"Name:- {signer_cn}")
-
-    if appearance_opts.get('show_issuer', False):
-        issuer_cn = "N/A"
-        if cert:
-            try:
-                for attr in cert.issuer:
-                    if attr.oid == x509.NameOID.COMMON_NAME:
-                        issuer_cn = attr.value; break
-            except Exception:
-                pass
-        lines.append(f"Issuer:- {issuer_cn}")
-
-    if appearance_opts.get('show_reason', True) and reason:
-        lines.append(f"Reason:- {reason}")
-    if appearance_opts.get('show_address', True) and location:
-        lines.append(f"Address:- {location}")
-    if contact:
-        lines.append(f"Contact:- {contact}")
-
-    if appearance_opts.get('show_date', True):
-        lines.append(f"Date:- {datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')}")
-
-    if not lines:
-        lines = [f"Signed by {signer_cn}"]
+    lines = build_signature_stamp_lines(cert, reason=reason, location=location, contact=contact, appearance_opts=appearance_opts)
 
     reader = PdfReader(io.BytesIO(pdf_bytes))
     writer = PdfWriter()
@@ -1422,60 +1492,66 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 aw = float(area['width'])
                 ah = float(area['height'])
 
-                # Signature outer box border (only if show_border is True)
+                # 1. Outer Box Border (only if show_border is True)
                 if appearance_opts.get('show_border', False):
-                    c.setStrokeColorRGB(0.1, 0.2, 0.3)
-                    c.setLineWidth(1.2)
-                    c.rect(ax, ay, aw, ah)
+                    c.setStrokeColor(Color(0.12, 0.23, 0.44))
+                    c.setLineWidth(1.0)
+                    c.roundRect(ax, ay, aw, ah, 3, stroke=1, fill=0)
 
-                # Draw custom logo if provided
+                # 2. Draw Logo on Left
                 has_logo = False
-                logo_w = 0
-                if logo_path and os.path.exists(logo_path):
+                logo_w = 0.0
+                eff_logo = logo_path if (logo_path and os.path.exists(logo_path)) else None
+                if eff_logo:
                     try:
-                        logo_dim = min(aw * 0.28, ah * 0.82)
+                        logo_dim = min(aw * 0.25, ah * 0.76)
                         logo_w = logo_dim
-                        logo_h = logo_dim
-                        logo_x = ax + (aw * 0.03)
-                        logo_y = ay + (ah - logo_h) / 2
-                        c.drawImage(logo_path, logo_x, logo_y, width=logo_w, height=logo_h, mask='auto', preserveAspectRatio=True)
+                        logo_x = ax + 5
+                        logo_y = ay + (ah - logo_dim) / 2
+                        c.drawImage(eff_logo, logo_x, logo_y, width=logo_dim, height=logo_dim, mask='auto', preserveAspectRatio=True)
                         has_logo = True
                     except Exception as e:
-                        logger.warning(f"ReportLab custom logo error: {e}")
-                        has_logo = False
+                        logger.warning(f"ReportLab logo render notice: {e}")
 
-                # Background watermark green checkmark (only if show_tick is True)
+                # 3. Soft Background Green Checkmark Watermark
                 if appearance_opts.get('show_tick', True):
-                    c.setStrokeColor(Color(0.2, 0.7, 0.4, alpha=0.35))
-                    c.setLineWidth(max(1.5, aw * 0.06))
+                    c.setStrokeColor(Color(0.15, 0.65, 0.35, alpha=0.12))
+                    c.setLineWidth(max(1.8, aw * 0.035))
                     c.setLineJoin(1)
-                    tick_offset_x = (logo_w + aw * 0.04) if has_logo else 0
-                    cx, cy, s = ax + tick_offset_x + ((aw - tick_offset_x) / 2), ay + (ah / 2), min(aw - tick_offset_x, ah) * 0.35
+                    tick_offset_x = (logo_w + 6) if has_logo else 0
+                    cx, cy, s = ax + tick_offset_x + ((aw - tick_offset_x) * 0.5), ay + (ah * 0.5), min(aw - tick_offset_x, ah) * 0.35
                     p = c.beginPath()
                     p.moveTo(cx - s, cy)
                     p.lineTo(cx - s * 0.2, cy - s * 0.6)
                     p.lineTo(cx + s * 0.8, cy + s * 0.8)
                     c.drawPath(p, 1, 0)
 
-                # Text positioning on right of logo
-                left_pad = (aw * 0.03) + (logo_w + (aw * 0.04) if has_logo else 0)
-                right_pad = aw * 0.03
+                # 4. Text Information with Dynamic Auto-Fitting Font Size
+                left_pad = (logo_w + 8) if has_logo else 6
+                right_pad = 5
+                top_pad = 3
+                bottom_pad = 3
                 avail_w = max(aw - left_pad - right_pad, 20.0)
-                avail_h = max(ah - (ah * 0.08), 10.0)
+                avail_h = max(ah - top_pad - bottom_pad, 10.0)
 
-                f_size = min(avail_w / (max(len(l) for l in lines) * 0.55), avail_h / (len(lines) * 1.25), 11.0)
-                f_size = max(f_size, 5.5)
-                line_spacing = f_size * 1.25
+                n = len(lines)
+                max_len = max(len(txt) for txt, _, _ in lines) if lines else 1
+                calc_f = min(avail_h / (n * 1.18), avail_w / (max_len * 0.52), 9.0)
+                f_size = max(calc_f, 3.8)
+                spacing = f_size * 1.16
 
-                c.setFillColorRGB(0.1, 0.1, 0.1)
-                ty = ay + ah - line_spacing - (ah * 0.04)
-                c.setFont("Helvetica-Bold", f_size)
-                c.drawString(ax + left_pad, ty, lines[0])
-                ty -= line_spacing
-                c.setFont("Helvetica", f_size * 0.95)
-                for l in lines[1:]:
-                    c.drawString(ax + left_pad, ty, l)
-                    ty -= line_spacing
+                total_h = n * spacing
+                start_y = ay + (ah + total_h) / 2 - f_size
+                cur_y = start_y
+
+                for txt, is_bold, (r, g, b) in lines:
+                    c.setFont("Helvetica-Bold" if is_bold else "Helvetica", f_size * (1.08 if is_bold else 0.96))
+                    c.setFillColorRGB(r, g, b)
+                    render_txt = txt
+                    while len(render_txt) > 4 and c.stringWidth(render_txt, "Helvetica-Bold" if is_bold else "Helvetica", f_size) > avail_w:
+                        render_txt = render_txt[:-4] + "..."
+                    c.drawString(ax + left_pad, cur_y, render_txt)
+                    cur_y -= spacing
 
             c.save()
             packet.seek(0)
@@ -5222,10 +5298,12 @@ class VisualPdfSignerApp:
 
             field_spec = SigFieldSpec(sig_field_name=field_name, box=(x1, y1, x2, y2), on_page=p_idx)
             w = IncrementalPdfFileWriter(current_io)
+            empty_stamp = StaticStampStyle(border_width=0, background=None)
             pdf_signer = signers.PdfSigner(
                 signature_meta=signers.PdfSignatureMetadata(field_name=field_name),
                 signer=signer,
                 timestamper=tst,
+                stamp_style=empty_stamp,
                 new_field_spec=field_spec
             )
             out_io = io.BytesIO()
