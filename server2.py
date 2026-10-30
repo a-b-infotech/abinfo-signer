@@ -1483,7 +1483,7 @@ def get_rapid_ocr_engine():
     return _RAPID_OCR_ENGINE
 
 def build_signature_stamp_lines(cert, reason="", location="", contact="", appearance_opts=None):
-    """Build clean structured text lines for signature stamp with visual hierarchy, bold text, and organization."""
+    """Build clean structured text lines for 3D signature card with visual hierarchy, bold text, and organization."""
     if appearance_opts is None:
         appearance_opts = {}
 
@@ -1491,6 +1491,9 @@ def build_signature_stamp_lines(cert, reason="", location="", contact="", appear
     signer_cn = "Authorized Signer"
     issuer_cn = "N/A"
     org_name = ""
+    unit_name = ""
+    country = ""
+    state = ""
 
     if cert:
         try:
@@ -1502,8 +1505,12 @@ def build_signature_stamp_lines(cert, reason="", location="", contact="", appear
                         signer_cn = val
                     elif attr.oid == x509.NameOID.ORGANIZATION_NAME or oid_dot == '2.5.4.10':
                         org_name = val
-                    elif not org_name and (attr.oid == x509.NameOID.ORGANIZATIONAL_UNIT_NAME or oid_dot == '2.5.4.11'):
-                        org_name = val
+                    elif attr.oid == x509.NameOID.ORGANIZATIONAL_UNIT_NAME or oid_dot == '2.5.4.11':
+                        unit_name = val
+                    elif attr.oid == x509.NameOID.COUNTRY_NAME or oid_dot == '2.5.4.6':
+                        country = val
+                    elif attr.oid == x509.NameOID.STATE_OR_PROVINCE_NAME or oid_dot == '2.5.4.8':
+                        state = val
         except Exception:
             pass
         try:
@@ -1513,7 +1520,13 @@ def build_signature_stamp_lines(cert, reason="", location="", contact="", appear
                     if not signer_cn or signer_cn == "Authorized Signer":
                         signer_cn = nat.get('common_name') or signer_cn
                     if not org_name:
-                        org_name = nat.get('organization_name') or nat.get('organizational_unit_name') or ""
+                        org_name = nat.get('organization_name') or ""
+                    if not unit_name:
+                        unit_name = nat.get('organizational_unit_name') or ""
+                    if not country:
+                        country = nat.get('country_name') or ""
+                    if not state:
+                        state = nat.get('state_or_province_name') or ""
         except Exception:
             pass
         try:
@@ -1533,40 +1546,55 @@ def build_signature_stamp_lines(cert, reason="", location="", contact="", appear
         except Exception:
             pass
 
-    lines = []
-    # Header & Name (prominent bold name in deep navy)
+    header_title = "Digitally signed by:" if appearance_opts.get('show_name', True) else "Digitally Signed"
+
+    body_lines = []
+    # 1. Signer Name (Prominent bold text in deep dark slate / navy)
     if appearance_opts.get('show_name', True):
-        lines.append(("Digitally signed by", False, (0.08, 0.18, 0.42)))
-        lines.append((signer_cn, True, (0.03, 0.07, 0.18)))
-    else:
-        lines.append(("Digitally Signed", True, (0.03, 0.07, 0.18)))
+        body_lines.append((signer_cn, True, (0.06, 0.09, 0.16)))
 
-    # Organization Checkbox option (by default checked/ticked)
+    # 2. Organization Name
     if appearance_opts.get('show_org', True) and org_name:
-        lines.append((f"Org: {org_name}", True, (0.05, 0.12, 0.28)))
+        body_lines.append((f"Organization: {org_name}", False, (0.20, 0.25, 0.33)))
 
-    if appearance_opts.get('show_issuer', False) and issuer_cn != "N/A":
-        lines.append((f"Issuer: {issuer_cn}", False, (0.12, 0.16, 0.22)))
+    # 3. Organizational Unit or Reason
+    if unit_name:
+        body_lines.append((f"Unit: {unit_name}", False, (0.20, 0.25, 0.33)))
+    elif appearance_opts.get('show_reason', True) and reason:
+        body_lines.append((f"Reason: {reason}", False, (0.20, 0.25, 0.33)))
 
-    if appearance_opts.get('show_reason', True) and reason:
-        lines.append((f"Reason: {reason}", True, (0.10, 0.15, 0.24)))
+    if unit_name and appearance_opts.get('show_reason', True) and reason:
+        body_lines.append((f"Reason: {reason}", False, (0.20, 0.25, 0.33)))
 
-    if appearance_opts.get('show_address', True) and location:
-        lines.append((f"Location: {location}", False, (0.12, 0.16, 0.22)))
-
-    if contact:
-        lines.append((f"Contact: {contact}", False, (0.12, 0.16, 0.22)))
-
+    # 4. Date (Royal navy blue, bold)
     if appearance_opts.get('show_date', True):
         d_str = datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')
-        lines.append((f"Date: {d_str}", False, (0.12, 0.16, 0.22)))
+        body_lines.append((f"Date: {d_str}", True, (0.12, 0.25, 0.69)))
 
-    return lines
+    # 5. Location / Address
+    if appearance_opts.get('show_address', True):
+        loc_val = location
+        if not loc_val and (state or country):
+            loc_val = f"{state}, {country}".strip(', ')
+        if loc_val:
+            body_lines.append((f"Location: {loc_val}", False, (0.28, 0.33, 0.41)))
+
+    # 6. Issuer
+    if appearance_opts.get('show_issuer', False) and issuer_cn != "N/A":
+        body_lines.append((f"Issuer: {issuer_cn}", False, (0.28, 0.33, 0.41)))
+
+    # 7. Contact
+    if contact:
+        body_lines.append((f"Contact: {contact}", False, (0.28, 0.33, 0.41)))
+
+    return header_title, body_lines
 
 def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="", contact="", logo_path=None, appearance_opts=None):
     """
     Draw visual signature stamp directly and incrementally on the PDF using PyMuPDF,
     preserving 100% of original bytes so preexisting digital signatures remain intact!
+    Renders an elevated 3D card appearance with soft drop shadows, teal header bar,
+    verified green badge, background watermarks, and auto-scaled crisp typography.
     """
     if appearance_opts is None:
         appearance_opts = {
@@ -1582,7 +1610,9 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
 
     try:
         doc = fitz.open(tf_name)
-        lines = build_signature_stamp_lines(cert, reason=reason, location=location, contact=contact, appearance_opts=appearance_opts)
+        header_title, body_lines = build_signature_stamp_lines(
+            cert, reason=reason, location=location, contact=contact, appearance_opts=appearance_opts
+        )
 
         for a in areas:
             p_idx = int(a.get('page', 0))
@@ -1595,81 +1625,140 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             ay_pdf = float(a['y'])
             aw = float(a['width'])
             ah = float(a['height'])
-            ay_mupdf = ph - (ay_pdf + ah)
+            ay = ph - (ay_pdf + ah)  # PyMuPDF top-left y
 
-            # 1. Outer Box Border (crisp, professional 1.2px border in rich navy)
-            if appearance_opts.get('show_border', True):
+            # Proportional geometry calculations
+            r_pt = min(max(ah * 0.075, 4.0), 10.0)
+            r_pct = min(max(r_pt / min(aw, ah), 0.03), 0.15)
+            hh = max(min(ah * 0.25, 26.0), 16.0)
+            header_r_pct = min(r_pt / hh, 0.49)
+
+            # 1. 3D Card Soft Drop Shadows (multi-layered for realistic depth)
+            for off, alpha in [(2.4, 0.06), (1.4, 0.10), (0.7, 0.14)]:
                 page.draw_rect(
-                    fitz.Rect(ax, ay_mupdf, ax + aw, ay_mupdf + ah),
-                    color=(0.10, 0.20, 0.45),
-                    width=1.2
+                    fitz.Rect(ax + off * 0.5, ay + off, ax + aw + off * 0.5, ay + ah + off),
+                    fill=(0.10, 0.12, 0.16), color=None, radius=r_pct, fill_opacity=alpha
                 )
 
-            # 2. Left Logo / Emblem
+            # 2. Card White Body Background
+            page.draw_rect(
+                fitz.Rect(ax, ay, ax + aw, ay + ah),
+                fill=(1, 1, 1),
+                color=(0.05, 0.46, 0.43) if appearance_opts.get('show_border', True) else None,
+                radius=r_pct,
+                width=1.4 if appearance_opts.get('show_border', True) else 0
+            )
+
+            # 3. Teal Header Banner (top rounded corners, square bottom)
+            page.draw_rect(
+                fitz.Rect(ax, ay, ax + aw, ay + hh),
+                fill=(0.05, 0.46, 0.43), color=None, radius=header_r_pct
+            )
+            page.draw_rect(
+                fitz.Rect(ax, ay + hh - r_pt, ax + aw, ay + hh),
+                fill=(0.05, 0.46, 0.43), color=None
+            )
+
+            # 4. Verified Green Circular Badge + White Tick inside Header
+            badge_r = min(hh * 0.32, 6.5)
+            badge_cx = ax + max(aw * 0.04, 8.0) + badge_r
+            badge_cy = ay + hh * 0.5
+            page.draw_circle(fitz.Point(badge_cx, badge_cy), badge_r, fill=(0.06, 0.72, 0.50), color=None)
+
+            p1 = fitz.Point(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
+            p2 = fitz.Point(badge_cx - badge_r * 0.10, badge_cy + badge_r * 0.38)
+            p3 = fitz.Point(badge_cx + badge_r * 0.50, badge_cy - badge_r * 0.42)
+            page.draw_polyline([p1, p2, p3], color=(1, 1, 1), width=max(1.2, badge_r * 0.22), lineJoin=1)
+
+            # Header Title Text (Bold White)
+            header_f = max(min(hh * 0.46, 9.5), 5.5)
+            text_y = ay + hh * 0.5 + header_f * 0.35
+            page.insert_text(
+                fitz.Point(badge_cx + badge_r + 6, text_y),
+                header_title,
+                fontsize=header_f, fontname='hebo', color=(1, 1, 1)
+            )
+
+            # 5. Background Watermarks in Card Body
+            body_top = ay + hh
+            body_h = max(ah - hh, 10.0)
+
+            # Watermark 1: Large Translucent Checkmark on right side
+            if appearance_opts.get('show_tick', True):
+                tick_cx = ax + aw * 0.76
+                tick_cy = body_top + body_h * 0.52
+                ts = min(aw * 0.20, body_h * 0.42)
+                w_p1 = fitz.Point(tick_cx - ts, tick_cy)
+                w_p2 = fitz.Point(tick_cx - ts * 0.20, tick_cy + ts * 0.65)
+                w_p3 = fitz.Point(tick_cx + ts * 0.82, tick_cy - ts * 0.75)
+                page.draw_polyline(
+                    [w_p1, w_p2, w_p3],
+                    color=(0.05, 0.46, 0.43),
+                    width=max(2.8, ts * 0.18),
+                    stroke_opacity=0.16,
+                    lineJoin=1
+                )
+
+            # Watermark 2: Subtle 'DIGITALLY SIGNED' text in bottom-right corner
+            wm_text = 'DIGITALLY SIGNED'
+            wm_f = max(min(body_h * 0.22, aw * 0.07, 12.0), 5.0)
+            wm_w = fitz.get_text_length(wm_text, fontname='hebo', fontsize=wm_f)
+            if wm_w < aw * 0.65:
+                page.insert_text(
+                    fitz.Point(ax + aw - wm_w - 10, ay + ah - 6),
+                    wm_text,
+                    fontsize=wm_f, fontname='hebo',
+                    color=(0.05, 0.46, 0.43), fill_opacity=0.10
+                )
+
+            # 6. Left Custom Logo (if configured and exists)
             has_logo = False
             logo_w = 0.0
             eff_logo = logo_path if (logo_path and os.path.exists(logo_path)) else None
             if eff_logo:
                 try:
-                    logo_dim = min(aw * 0.25, ah * 0.78)
+                    logo_dim = min(aw * 0.22, body_h * 0.80)
                     logo_w = logo_dim
-                    logo_x = ax + 5
-                    logo_y = ay_mupdf + (ah - logo_dim) / 2
-                    page.insert_image(fitz.Rect(logo_x, logo_y, logo_x + logo_dim, logo_y + logo_dim), filename=eff_logo)
+                    logo_x = ax + 10
+                    logo_y = body_top + (body_h - logo_dim) / 2
+                    page.insert_image(
+                        fitz.Rect(logo_x, logo_y, logo_x + logo_dim, logo_y + logo_dim),
+                        filename=eff_logo
+                    )
                     has_logo = True
                 except Exception as e:
                     logger.warning(f"PyMuPDF custom logo overlay error: {e}")
 
-            # 3. Soft Background Green Checkmark Watermark (10% darker light-green, stroke_opacity=0.30)
-            if appearance_opts.get('show_tick', True):
-                tick_offset_x = (logo_w + 6) if has_logo else 0
-                cx = ax + tick_offset_x + ((aw - tick_offset_x) * 0.5)
-                cy = ay_mupdf + (ah * 0.5)
-                s = min(aw - tick_offset_x, ah) * 0.35
-                p1 = fitz.Point(cx - s, cy)
-                p2 = fitz.Point(cx - s * 0.2, cy + s * 0.6)
-                p3 = fitz.Point(cx + s * 0.8, cy - s * 0.8)
-                page.draw_polyline(
-                    [p1, p2, p3],
-                    color=(0.10, 0.62, 0.28),
-                    width=max(2.2, aw * 0.04),
-                    stroke_opacity=0.30,
-                    lineJoin=1
-                )
-
-            # 4. Dynamic Auto-Fitting Big & Bold Typography (no premature truncation)
-            left_pad = (logo_w + 8) if has_logo else 6
-            right_pad = 5
-            top_pad = 3
-            bottom_pad = 3
+            # 7. Body Text Typography (Dynamic Scaling & Auto-Fitting)
+            left_pad = (logo_w + 14) if has_logo else 12
+            right_pad = 8
             avail_w = max(aw - left_pad - right_pad, 20.0)
-            avail_h = max(ah - top_pad - bottom_pad, 10.0)
+            body_avail_h = max(body_h - 10, 10.0)
 
-            n = len(lines)
-            spacing = avail_h / max(n, 1)
-            base_f_size = max(min(spacing * 0.78, 12.0), 5.0)
+            n = len(body_lines)
+            spacing = body_avail_h / max(n, 1)
+            base_f = max(min(spacing * 0.72, 10.5), 4.5)
+            cur_y = body_top + 6 + base_f * 0.90
 
-            total_h = n * spacing
-            cur_y = ay_mupdf + (ah - total_h) / 2 + base_f_size * 0.88
-
-            for idx_l, (txt, is_bold, col) in enumerate(lines):
-                line_f_size = base_f_size * (1.18 if (is_bold and idx_l == 1) else (1.05 if is_bold else 0.96))
-                fn = "hebo" if is_bold else "helv"
-                w_text = fitz.get_text_length(txt, fontname=fn, fontsize=line_f_size)
-                if w_text > avail_w and line_f_size > 4.5:
-                    line_f_size = max(line_f_size * (avail_w / w_text) * 0.98, 4.5)
-                    w_text = fitz.get_text_length(txt, fontname=fn, fontsize=line_f_size)
+            for idx, (txt, is_b, col) in enumerate(body_lines):
+                f_size = base_f * (1.14 if idx == 0 else (1.02 if is_b else 0.95))
+                fn = 'hebo' if is_b else 'helv'
+                w_t = fitz.get_text_length(txt, fontname=fn, fontsize=f_size)
+                if w_t > (avail_w * 0.92) and f_size > 3.5:
+                    f_size = max(f_size * (avail_w * 0.92 / w_t), 3.5)
+                    w_t = fitz.get_text_length(txt, fontname=fn, fontsize=f_size)
                 render_txt = txt
-                while len(render_txt) > 4 and fitz.get_text_length(render_txt, fontname=fn, fontsize=line_f_size) > avail_w:
+                while len(render_txt) > 4 and fitz.get_text_length(render_txt, fontname=fn, fontsize=f_size) > avail_w:
                     render_txt = render_txt[:-4] + "..."
-                page.insert_text(
-                    fitz.Point(ax + left_pad, cur_y),
-                    render_txt,
-                    fontsize=line_f_size,
-                    fontname=fn,
-                    color=col
-                )
+                page.insert_text(fitz.Point(ax + left_pad, cur_y), render_txt, fontsize=f_size, fontname=fn, color=col)
                 cur_y += spacing
+
+            # 8. Crisp Outer Border Stroke
+            if appearance_opts.get('show_border', True):
+                page.draw_rect(
+                    fitz.Rect(ax, ay, ax + aw, ay + ah),
+                    fill=None, color=(0.05, 0.46, 0.43), radius=r_pct, width=1.4
+                )
 
         doc.save(tf_name, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         doc.close()
@@ -1696,7 +1785,9 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
             'show_border': True
         }
 
-    lines = build_signature_stamp_lines(cert, reason=reason, location=location, contact=contact, appearance_opts=appearance_opts)
+    header_title, body_lines = build_signature_stamp_lines(
+        cert, reason=reason, location=location, contact=contact, appearance_opts=appearance_opts
+    )
 
     reader = PdfReader(io.BytesIO(pdf_bytes))
     writer = PdfWriter()
@@ -1720,70 +1811,119 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 aw = float(area['width'])
                 ah = float(area['height'])
 
-                # 1. Outer Box Border (only if show_border is True)
-                if appearance_opts.get('show_border', True):
-                    c.setStrokeColor(Color(0.10, 0.20, 0.45))
-                    c.setLineWidth(1.2)
-                    c.roundRect(ax, ay, aw, ah, 3, stroke=1, fill=0)
+                r_pt = min(max(ah * 0.075, 4.0), 10.0)
+                hh = max(min(ah * 0.25, 26.0), 16.0)
 
-                # 2. Draw Logo on Left
+                # 1. 3D Card Soft Drop Shadows (multi-layered for realistic depth)
+                for off, alpha in [(2.4, 0.06), (1.4, 0.10), (0.7, 0.14)]:
+                    c.setFillColor(Color(0.10, 0.12, 0.16, alpha=alpha))
+                    c.roundRect(ax + off * 0.5, ay - off, aw, ah, r_pt, fill=1, stroke=0)
+
+                # 2. Card White Body Background
+                c.setFillColor(Color(1, 1, 1))
+                c.setStrokeColor(Color(0.05, 0.46, 0.43))
+                c.setLineWidth(1.4)
+                c.roundRect(ax, ay, aw, ah, r_pt, fill=1, stroke=1 if appearance_opts.get('show_border', True) else 0)
+
+                # 3. Teal Header Banner (top rounded corners, square bottom)
+                c.setFillColor(Color(0.05, 0.46, 0.43))
+                c.roundRect(ax, ay + ah - hh, aw, hh, r_pt, fill=1, stroke=0)
+                c.rect(ax, ay + ah - hh, aw, r_pt, fill=1, stroke=0)
+
+                # 4. Verified Green Circular Badge + White Tick inside Header
+                badge_r = min(hh * 0.32, 6.5)
+                badge_cx = ax + max(aw * 0.04, 8.0) + badge_r
+                badge_cy = ay + ah - hh * 0.5
+                c.setFillColor(Color(0.06, 0.72, 0.50))
+                c.circle(badge_cx, badge_cy, badge_r, fill=1, stroke=0)
+
+                p = c.beginPath()
+                p.moveTo(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
+                p.lineTo(badge_cx - badge_r * 0.10, badge_cy - badge_r * 0.38)
+                p.lineTo(badge_cx + badge_r * 0.50, badge_cy + badge_r * 0.42)
+                c.setStrokeColor(Color(1, 1, 1))
+                c.setLineWidth(max(1.2, badge_r * 0.22))
+                c.setLineJoin(1)
+                c.drawPath(p, 1, 0)
+
+                # Header Title Text (Bold White)
+                header_f = max(min(hh * 0.46, 9.5), 5.5)
+                c.setFont('Helvetica-Bold', header_f)
+                c.setFillColor(Color(1, 1, 1))
+                c.drawString(badge_cx + badge_r + 6, ay + ah - hh * 0.5 - header_f * 0.32, header_title)
+
+                # 5. Background Watermarks in Card Body
+                body_h = max(ah - hh, 10.0)
+
+                # Watermark 1: Large Translucent Checkmark on right side
+                if appearance_opts.get('show_tick', True):
+                    tick_cx = ax + aw * 0.76
+                    tick_cy = ay + body_h * 0.52
+                    ts = min(aw * 0.20, body_h * 0.42)
+                    c.setStrokeColor(Color(0.05, 0.46, 0.43, alpha=0.16))
+                    c.setLineWidth(max(2.8, ts * 0.18))
+                    c.setLineJoin(1)
+                    w_p = c.beginPath()
+                    w_p.moveTo(tick_cx - ts, tick_cy)
+                    w_p.lineTo(tick_cx - ts * 0.20, tick_cy - ts * 0.65)
+                    w_p.lineTo(tick_cx + ts * 0.82, tick_cy + ts * 0.75)
+                    c.drawPath(w_p, 1, 0)
+
+                # Watermark 2: Subtle 'DIGITALLY SIGNED' text in bottom-right corner
+                wm_text = 'DIGITALLY SIGNED'
+                wm_f = max(min(body_h * 0.22, aw * 0.07, 12.0), 5.0)
+                c.setFont('Helvetica-Bold', wm_f)
+                c.setFillColor(Color(0.05, 0.46, 0.43, alpha=0.10))
+                wm_w = c.stringWidth(wm_text, 'Helvetica-Bold', wm_f)
+                if wm_w < aw * 0.65:
+                    c.drawString(ax + aw - wm_w - 10, ay + 6, wm_text)
+
+                # 6. Left Custom Logo (if configured and exists)
                 has_logo = False
                 logo_w = 0.0
                 eff_logo = logo_path if (logo_path and os.path.exists(logo_path)) else None
                 if eff_logo:
                     try:
-                        logo_dim = min(aw * 0.25, ah * 0.78)
+                        logo_dim = min(aw * 0.22, body_h * 0.80)
                         logo_w = logo_dim
-                        logo_x = ax + 5
-                        logo_y = ay + (ah - logo_dim) / 2
+                        logo_x = ax + 10
+                        logo_y = ay + (body_h - logo_dim) / 2
                         c.drawImage(eff_logo, logo_x, logo_y, width=logo_dim, height=logo_dim, mask='auto', preserveAspectRatio=True)
                         has_logo = True
                     except Exception as e:
-                        logger.warning(f"ReportLab logo render notice: {e}")
+                        logger.warning(f"ReportLab custom logo overlay error: {e}")
 
-                # 3. Soft Background Green Checkmark Watermark (10% darker light-green, alpha=0.25)
-                if appearance_opts.get('show_tick', True):
-                    c.setStrokeColor(Color(0.10, 0.62, 0.28, alpha=0.25))
-                    c.setLineWidth(max(2.2, aw * 0.04))
-                    c.setLineJoin(1)
-                    tick_offset_x = (logo_w + 6) if has_logo else 0
-                    cx, cy, s = ax + tick_offset_x + ((aw - tick_offset_x) * 0.5), ay + (ah * 0.5), min(aw - tick_offset_x, ah) * 0.35
-                    p = c.beginPath()
-                    p.moveTo(cx - s, cy)
-                    p.lineTo(cx - s * 0.2, cy - s * 0.6)
-                    p.lineTo(cx + s * 0.8, cy + s * 0.8)
-                    c.drawPath(p, 1, 0)
-
-                # 4. Text Information with Big & Bold Typography (no premature truncation)
-                left_pad = (logo_w + 8) if has_logo else 6
-                right_pad = 5
-                top_pad = 3
-                bottom_pad = 3
+                # 7. Body Text Typography (Dynamic Scaling & Auto-Fitting)
+                left_pad = (logo_w + 14) if has_logo else 12
+                right_pad = 8
                 avail_w = max(aw - left_pad - right_pad, 20.0)
-                avail_h = max(ah - top_pad - bottom_pad, 10.0)
+                body_avail_h = max(body_h - 10, 10.0)
 
-                n = len(lines)
-                spacing = avail_h / max(n, 1)
-                base_f_size = max(min(spacing * 0.78, 12.0), 5.0)
+                n = len(body_lines)
+                spacing = body_avail_h / max(n, 1)
+                base_f = max(min(spacing * 0.72, 10.5), 4.5)
+                cur_y = ay + body_h - 6 - base_f * 0.88
 
-                total_h = n * spacing
-                start_y = ay + (ah + total_h) / 2 - base_f_size * 0.90
-                cur_y = start_y
-
-                for idx_l, (txt, is_bold, (r, g, b)) in enumerate(lines):
-                    line_f_size = base_f_size * (1.18 if (is_bold and idx_l == 1) else (1.05 if is_bold else 0.96))
-                    font_name = "Helvetica-Bold" if is_bold else "Helvetica"
-                    w_text = c.stringWidth(txt, font_name, line_f_size)
-                    if w_text > avail_w and line_f_size > 4.5:
-                        line_f_size = max(line_f_size * (avail_w / w_text) * 0.98, 4.5)
-                        w_text = c.stringWidth(txt, font_name, line_f_size)
+                for idx, (txt, is_b, (r, g, b)) in enumerate(body_lines):
+                    f_size = base_f * (1.14 if idx == 0 else (1.02 if is_b else 0.95))
+                    fn = 'Helvetica-Bold' if is_b else 'Helvetica'
+                    w_t = c.stringWidth(txt, fn, f_size)
+                    if w_t > (avail_w * 0.92) and f_size > 3.5:
+                        f_size = max(f_size * (avail_w * 0.92 / w_t), 3.5)
+                        w_t = c.stringWidth(txt, fn, f_size)
                     render_txt = txt
-                    while len(render_txt) > 4 and c.stringWidth(render_txt, font_name, line_f_size) > avail_w:
+                    while len(render_txt) > 4 and c.stringWidth(render_txt, fn, f_size) > avail_w:
                         render_txt = render_txt[:-4] + "..."
-                    c.setFont(font_name, line_f_size)
-                    c.setFillColorRGB(r, g, b)
+                    c.setFont(fn, f_size)
+                    c.setFillColor(Color(r, g, b))
                     c.drawString(ax + left_pad, cur_y, render_txt)
                     cur_y -= spacing
+
+                # 8. Crisp Outer Border Stroke
+                if appearance_opts.get('show_border', True):
+                    c.setStrokeColor(Color(0.05, 0.46, 0.43))
+                    c.setLineWidth(1.4)
+                    c.roundRect(ax, ay, aw, ah, r_pt, fill=0, stroke=1)
 
             c.save()
             packet.seek(0)
