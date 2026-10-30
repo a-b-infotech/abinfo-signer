@@ -104,14 +104,165 @@ try:
     from reportlab.pdfgen import canvas as rl_canvas
     from reportlab.lib.colors import Color
     from asn1crypto import x509 as a509, keys as akeys
-    # Patch telephone_number to DirectoryString to accept UTF8String without tag mismatch
-    try:
-        a509.NameTypeAndValue._oid_specs['telephone_number'] = a509.DirectoryString
-    except Exception:
-        pass
     from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
     from cryptography.x509.oid import NameOID, ExtensionOID
     from pyhanko_certvalidator.registry import SimpleCertificateStore
+
+    # Patch 1: asn1crypto DirectoryString to accept UTF8String (tag 12) without tag mismatch on Indian DSC certs
+    try:
+        a509.NameTypeAndValue._oid_specs['telephone_number'] = a509.DirectoryString
+        a509.ExtensionAttribute._oid_specs['common_name'] = a509.DirectoryString
+        a509.ExtensionAttribute._oid_specs['pds_name'] = a509.DirectoryString
+    except Exception:
+        pass
+
+    # Patch 2: pyHanko pdf_cms.Signer.subject_name to safely extract cert names without KeyError: 'organization_name'
+    try:
+        from pyhanko.sign.signers import pdf_cms
+        def _safe_subject_name(self):
+            if self.signing_cert is None:
+                return "Digital Signature"
+            try:
+                name = self.signing_cert.subject
+                res = None
+                try:
+                    native = getattr(name, 'native', None)
+                    if isinstance(native, dict):
+                        res = (
+                            native.get('common_name')
+                            or native.get('organization_name')
+                            or native.get('serial_number')
+                            or native.get('pseudonym')
+                        )
+                        email = native.get('email_address')
+                        if res and email:
+                            res = f"{res} <{email}>"
+                except Exception:
+                    pass
+                if res:
+                    return str(res)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, '_parsed_cert') and self._parsed_cert:
+                    for attr in self._parsed_cert.subject:
+                        if attr.oid == NameOID.COMMON_NAME:
+                            return str(attr.value)
+            except Exception:
+                pass
+            return "Digital Signature"
+        pdf_cms.Signer.subject_name = property(_safe_subject_name)
+    except Exception:
+        pass
+
+    # Patch 3: pyHanko enumerate_sig_fields_in to prevent TypeError on ByteStringObject in existing signatures
+    try:
+        import pyhanko.sign.fields as _pyhanko_fields
+        def _patched_enumerate_sig_fields_in(
+            field_list,
+            filled_status=None,
+            with_name=None,
+            parent_name="",
+            parents=None,
+            *,
+            refs_seen,
+        ):
+            if not isinstance(field_list, generic.ArrayObject):
+                return
+            parents = parents or ()
+            for field_ref in field_list:
+                if not isinstance(field_ref, generic.IndirectObject):
+                    continue
+                if field_ref.reference in refs_seen:
+                    raise _pyhanko_fields.PdfReadError("Circular reference in form tree")
+                field = field_ref.get_object()
+                if not isinstance(field, generic.DictionaryObject):
+                    continue
+                try:
+                    raw_field_name = field['/T']
+                    if isinstance(raw_field_name, (bytes, generic.ByteStringObject)):
+                        try:
+                            field_name_str = raw_field_name.decode('utf-8', errors='replace')
+                        except Exception:
+                            field_name_str = str(raw_field_name)
+                        field[generic.pdf_name('/T')] = generic.TextStringObject(field_name_str)
+                        field_name = field_name_str
+                    else:
+                        field_name = str(raw_field_name)
+                except KeyError:
+                    continue
+                fq_name = (
+                    field_name
+                    if not parent_name
+                    else ("%s.%s" % (parent_name, field_name))
+                )
+                target_name = str(with_name) if with_name is not None else None
+                fq_name_str = str(fq_name)
+                explicitly_requested = target_name is not None and fq_name_str == target_name
+                child_requested = explicitly_requested or (
+                    target_name is not None and target_name.startswith(fq_name_str)
+                )
+                current_path = (field,) + parents
+                for parent_field in current_path:
+                    try:
+                        field_type = parent_field['/FT']
+                        break
+                    except KeyError:
+                        continue
+                else:
+                    field_type = None
+                if field_type == '/Sig':
+                    field_value = field.get('/V')
+                    filled = field_value is not None
+                    status_check = filled_status is None or filled == filled_status
+                    name_check = target_name is None or explicitly_requested
+                    if status_check and name_check:
+                        yield fq_name_str, field_value, field_ref
+                elif explicitly_requested:
+                    raise _pyhanko_fields.SigningError(
+                        'Field with name %s exists but is not a signature field' % fq_name_str
+                    )
+                if target_name is None or (child_requested and not explicitly_requested):
+                    try:
+                        kids = field['/Kids']
+                    except KeyError:
+                        continue
+                    new_parents = (field,) + parents
+                    new_refs_seen = refs_seen | {field_ref.reference}
+                    yield from _patched_enumerate_sig_fields_in(
+                        kids,
+                        filled_status=filled_status,
+                        with_name=target_name,
+                        parent_name=fq_name_str,
+                        parents=new_parents,
+                        refs_seen=new_refs_seen,
+                    )
+        _pyhanko_fields.enumerate_sig_fields_in = _patched_enumerate_sig_fields_in
+    except Exception:
+        pass
+
+    # Patch 4: pyHanko FieldMDPSpec.is_locked safe string comparison
+    try:
+        from pyhanko.sign.fields import FieldMDPSpec, FieldMDPAction
+        def _safe_is_locked(self, field_name: str) -> bool:
+            if self.action == FieldMDPAction.ALL:
+                return True
+            lock_result = self.action == FieldMDPAction.INCLUDE
+            fn_str = str(field_name)
+            for scoped in self.fields or ():
+                if fn_str.startswith(str(scoped)):
+                    return lock_result
+            return not lock_result
+        FieldMDPSpec.is_locked = _safe_is_locked
+    except Exception:
+        pass
+
+    # Patch 5: pyHanko suppress default text stamp style overlap
+    try:
+        from pyhanko.sign.signers import constants as _p_constants
+        _p_constants.DEFAULT_SIGNING_STAMP_STYLE = StaticStampStyle(border_width=0, background=None)
+    except Exception:
+        pass
 except ImportError:
     print("Missing cryptography libraries: pip install PyPDF2 cryptography python-pkcs11 pyhanko[pkcs11] reportlab requests")
     sys.exit(1)
@@ -1343,20 +1494,42 @@ def build_signature_stamp_lines(cert, reason="", location="", contact="", appear
 
     if cert:
         try:
-            for attr in cert.subject:
-                if attr.oid == x509.NameOID.COMMON_NAME:
-                    signer_cn = attr.value
-                elif attr.oid == x509.NameOID.ORGANIZATION_NAME:
-                    org_name = attr.value
-                elif not org_name and attr.oid == x509.NameOID.ORGANIZATIONAL_UNIT_NAME:
-                    org_name = attr.value
+            if hasattr(cert, 'subject'):
+                for attr in cert.subject:
+                    oid_dot = getattr(attr.oid, 'dotted_string', '')
+                    val = str(attr.value)
+                    if attr.oid == x509.NameOID.COMMON_NAME or oid_dot == '2.5.4.3':
+                        signer_cn = val
+                    elif attr.oid == x509.NameOID.ORGANIZATION_NAME or oid_dot == '2.5.4.10':
+                        org_name = val
+                    elif not org_name and (attr.oid == x509.NameOID.ORGANIZATIONAL_UNIT_NAME or oid_dot == '2.5.4.11'):
+                        org_name = val
         except Exception:
             pass
         try:
-            for attr in cert.issuer:
-                if attr.oid == x509.NameOID.COMMON_NAME:
-                    issuer_cn = attr.value
-                    break
+            if hasattr(cert, 'subject') and hasattr(cert.subject, 'native'):
+                nat = cert.subject.native
+                if isinstance(nat, dict):
+                    if not signer_cn or signer_cn == "Authorized Signer":
+                        signer_cn = nat.get('common_name') or signer_cn
+                    if not org_name:
+                        org_name = nat.get('organization_name') or nat.get('organizational_unit_name') or ""
+        except Exception:
+            pass
+        try:
+            if hasattr(cert, 'issuer'):
+                for attr in cert.issuer:
+                    oid_dot = getattr(attr.oid, 'dotted_string', '')
+                    if attr.oid == x509.NameOID.COMMON_NAME or oid_dot == '2.5.4.3':
+                        issuer_cn = str(attr.value)
+                        break
+        except Exception:
+            pass
+        try:
+            if (issuer_cn == "N/A" or not issuer_cn) and hasattr(cert, 'issuer') and hasattr(cert.issuer, 'native'):
+                nat_iss = cert.issuer.native
+                if isinstance(nat_iss, dict):
+                    issuer_cn = nat_iss.get('common_name') or issuer_cn
         except Exception:
             pass
 
@@ -1464,8 +1637,8 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
                     lineJoin=1
                 )
 
-            # 4. Dynamic Auto-Fitting Big & Bold Typography
-            left_pad = (logo_w + 9) if has_logo else 7
+            # 4. Dynamic Auto-Fitting Big & Bold Typography (no premature truncation)
+            left_pad = (logo_w + 8) if has_logo else 6
             right_pad = 5
             top_pad = 3
             bottom_pad = 3
@@ -1473,24 +1646,27 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             avail_h = max(ah - top_pad - bottom_pad, 10.0)
 
             n = len(lines)
-            max_len = max(len(txt) for txt, _, _ in lines) if lines else 1
-            calc_f = min(avail_h / (n * 1.15), avail_w / (max_len * 0.46), 12.5)
-            f_size = max(calc_f, 5.0)
-            spacing = f_size * 1.18
+            spacing = avail_h / max(n, 1)
+            base_f_size = max(min(spacing * 0.78, 12.0), 5.0)
 
             total_h = n * spacing
-            cur_y = ay_mupdf + (ah - total_h) / 2 + f_size * 0.88
+            cur_y = ay_mupdf + (ah - total_h) / 2 + base_f_size * 0.88
 
             for idx_l, (txt, is_bold, col) in enumerate(lines):
+                line_f_size = base_f_size * (1.18 if (is_bold and idx_l == 1) else (1.05 if is_bold else 0.96))
+                fn = "hebo" if is_bold else "helv"
+                w_text = fitz.get_text_length(txt, fontname=fn, fontsize=line_f_size)
+                if w_text > avail_w and line_f_size > 4.5:
+                    line_f_size = max(line_f_size * (avail_w / w_text) * 0.98, 4.5)
+                    w_text = fitz.get_text_length(txt, fontname=fn, fontsize=line_f_size)
                 render_txt = txt
-                line_f_size = f_size * (1.20 if (is_bold and idx_l == 1) else (1.05 if is_bold else 0.98))
-                while len(render_txt) > 4 and (len(render_txt) * line_f_size * 0.48) > avail_w:
+                while len(render_txt) > 4 and fitz.get_text_length(render_txt, fontname=fn, fontsize=line_f_size) > avail_w:
                     render_txt = render_txt[:-4] + "..."
                 page.insert_text(
                     fitz.Point(ax + left_pad, cur_y),
                     render_txt,
                     fontsize=line_f_size,
-                    fontname="hebo" if is_bold else "helv",
+                    fontname=fn,
                     color=col
                 )
                 cur_y += spacing
@@ -1578,8 +1754,8 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                     p.lineTo(cx + s * 0.8, cy + s * 0.8)
                     c.drawPath(p, 1, 0)
 
-                # 4. Text Information with Big & Bold Typography
-                left_pad = (logo_w + 9) if has_logo else 7
+                # 4. Text Information with Big & Bold Typography (no premature truncation)
+                left_pad = (logo_w + 8) if has_logo else 6
                 right_pad = 5
                 top_pad = 3
                 bottom_pad = 3
@@ -1587,23 +1763,25 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 avail_h = max(ah - top_pad - bottom_pad, 10.0)
 
                 n = len(lines)
-                max_len = max(len(txt) for txt, _, _ in lines) if lines else 1
-                calc_f = min(avail_h / (n * 1.15), avail_w / (max_len * 0.46), 12.5)
-                f_size = max(calc_f, 5.0)
-                spacing = f_size * 1.18
+                spacing = avail_h / max(n, 1)
+                base_f_size = max(min(spacing * 0.78, 12.0), 5.0)
 
                 total_h = n * spacing
-                start_y = ay + (ah + total_h) / 2 - f_size * 0.90
+                start_y = ay + (ah + total_h) / 2 - base_f_size * 0.90
                 cur_y = start_y
 
                 for idx_l, (txt, is_bold, (r, g, b)) in enumerate(lines):
-                    line_f_size = f_size * (1.20 if (is_bold and idx_l == 1) else (1.05 if is_bold else 0.98))
+                    line_f_size = base_f_size * (1.18 if (is_bold and idx_l == 1) else (1.05 if is_bold else 0.96))
                     font_name = "Helvetica-Bold" if is_bold else "Helvetica"
-                    c.setFont(font_name, line_f_size)
-                    c.setFillColorRGB(r, g, b)
+                    w_text = c.stringWidth(txt, font_name, line_f_size)
+                    if w_text > avail_w and line_f_size > 4.5:
+                        line_f_size = max(line_f_size * (avail_w / w_text) * 0.98, 4.5)
+                        w_text = c.stringWidth(txt, font_name, line_f_size)
                     render_txt = txt
                     while len(render_txt) > 4 and c.stringWidth(render_txt, font_name, line_f_size) > avail_w:
                         render_txt = render_txt[:-4] + "..."
+                    c.setFont(font_name, line_f_size)
+                    c.setFillColorRGB(r, g, b)
                     c.drawString(ax + left_pad, cur_y, render_txt)
                     cur_y -= spacing
 
@@ -1949,10 +2127,12 @@ def sign_pdf():
                 final_writer = IncrementalPdfFileWriter(tmp_io)
                 sanitize_acroform_field_names(final_writer)
                 
+                empty_stamp = StaticStampStyle(border_width=0, background=None)
                 pdf_signer = signers.PdfSigner(
                     signature_meta=signers.PdfSignatureMetadata(field_name=field_name),
                     signer=signer, 
-                    timestamper=tst_client
+                    timestamper=tst_client,
+                    stamp_style=empty_stamp
                 )
                 
                 signed_out = io.BytesIO()
@@ -3064,6 +3244,31 @@ class SignatureSettingsDialog:
         self.ent_pass.pack(side=tk.LEFT, padx=6)
         self.btn_toggle_pass = ttk.Button(pass_row, text="Show", style="Tool3D.TButton", width=6, command=self._toggle_pass_visibility)
         self.btn_toggle_pass.pack(side=tk.LEFT)
+
+        # 4. Signature Stamp Visual Display Elements Card
+        c4 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c4.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(c4, text="4. Signature Stamp Visual Display Elements", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c4, text="Select which elements to include in the visual digital signature stamp (saved permanently):", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        grid4 = tk.Frame(c4, bg="#FFFFFF")
+        grid4.pack(fill=tk.X)
+        elements = [
+            ("Signer Full Name", app.show_name_var),
+            ("Organization / Company Name", app.show_org_var),
+            ("Date and IST Timestamp", app.show_date_var),
+            ("Signing Reason", app.show_reason_var),
+            ("Signer Location / Address", app.show_address_var),
+            ("Certificate Issuer (CA)", app.show_issuer_var),
+            ("Green Checkmark Watermark", app.show_tick_var),
+            ("Outer Box Border", app.show_border_var),
+        ]
+        for idx, (label, var) in enumerate(elements):
+            row = idx // 2
+            col = idx % 2
+            tk.Checkbutton(grid4, text=label, variable=var, font=get_sys_font(8, "bold"), fg="#1E293B", bg="#FFFFFF", anchor="w").grid(row=row, column=col, sticky="w", padx=8, pady=3)
+        grid4.columnconfigure(0, weight=1)
+        grid4.columnconfigure(1, weight=1)
 
         # Bottom Close Button
         btn_bot = tk.Frame(outer, bg="#F1F5F9")
@@ -5425,7 +5630,7 @@ class VisualPdfSignerApp:
                 reader_chk = PdfFileReader(io.BytesIO(current_io.getvalue()))
                 for s in reader_chk.embedded_signatures:
                     if s.field_name:
-                        existing_fields.add(s.field_name)
+                        existing_fields.add(str(s.field_name))
             except Exception:
                 pass
 
