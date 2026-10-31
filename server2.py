@@ -329,6 +329,7 @@ def save_signature_settings(app):
             "show_issuer": app.show_issuer_var.get() if hasattr(app, 'show_issuer_var') else False,
             "show_tick": app.show_tick_var.get() if hasattr(app, 'show_tick_var') else True,
             "show_border": app.show_border_var.get() if hasattr(app, 'show_border_var') else True,
+            "validation_status": app.sign_status_appearance_var.get() if hasattr(app, 'sign_status_appearance_var') else "✓ Verified (Green)",
         }
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
@@ -380,6 +381,8 @@ def load_signature_settings(app):
             app.show_tick_var.set(bool(data["show_tick"]))
         if hasattr(app, 'show_border_var') and "show_border" in data:
             app.show_border_var.set(bool(data["show_border"]))
+        if hasattr(app, 'sign_status_appearance_var') and "validation_status" in data:
+            app.sign_status_appearance_var.set(str(data["validation_status"]))
         logger.info("Permanent signature settings loaded successfully.")
     except Exception as e:
         logger.warning(f"Error loading signature_settings.json: {e}")
@@ -1126,11 +1129,12 @@ def preserve_signature_appearances_on_doc(doc, remove_broken_fields=True):
 
     return total_preserved
 
-def clean_pdf_signatures_completely(doc, keep_visual=True):
+def clean_pdf_signatures_completely(doc, keep_visual=False):
     """
     Detects and cleans all digital signatures from a PyMuPDF document:
     - If keep_visual=True, bakes the visual stamp at 300 DPI into the page content.
-    - If keep_visual=False, wipes the signature widget entirely without baking.
+    - If keep_visual=False, wipes the signature widget AND completely erases the visual
+      card, borders, watermarks, and text from the page content using precise redactions.
     - Deletes all signature widgets and removes broken catalog SigFlags/AcroForm.
     """
     total_cleaned = 0
@@ -1148,15 +1152,25 @@ def clean_pdf_signatures_completely(doc, keep_visual=True):
 
             for w in sig_widgets:
                 total_cleaned += 1
+                rect = w.rect
                 if keep_visual:
                     try:
-                        rect = w.rect
                         if not rect.is_empty and not rect.is_infinite and rect.width > 2 and rect.height > 2:
                             pix = page.get_pixmap(clip=rect, dpi=300)
                             if pix and pix.width > 0 and pix.height > 0:
                                 page.insert_image(rect, pixmap=pix)
                     except Exception as e:
                         logger.debug(f"Error baking stamp: {e}")
+                else:
+                    try:
+                        # Erase visual card, text, checkmarks, shadows & borders completely
+                        if not rect.is_empty and not rect.is_infinite and rect.width > 2 and rect.height > 2:
+                            r_clean = fitz.Rect(rect.x0 - 2, rect.y0 - 2, rect.x1 + 6, rect.y1 + 7)
+                            page.add_redact_annot(r_clean, fill=(1, 1, 1))
+                            page.apply_redactions()
+                    except Exception as red_e:
+                        logger.debug(f"Error redacting visual stamp: {red_e}")
+
                 try:
                     page.delete_widget(w)
                 except Exception:
@@ -1627,11 +1641,26 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             ah = float(a['height'])
             ay = ph - (ay_pdf + ah)  # PyMuPDF top-left y
 
+            # Validation status styling (Green Verified ✓, Yellow CRL ? , Red Invalid ✗)
+            v_status = str(appearance_opts.get('validation_status', 'verified')).lower()
+            if 'invalid' in v_status or 'red' in v_status:
+                theme_hdr = (0.75, 0.12, 0.12)
+                badge_col = (0.93, 0.20, 0.20)
+                badge_icon = "X"
+            elif 'unknown' in v_status or 'yellow' in v_status or 'crl' in v_status:
+                theme_hdr = (0.78, 0.48, 0.05)
+                badge_col = (0.96, 0.62, 0.07)
+                badge_icon = "?"
+            else:
+                theme_hdr = (0.05, 0.44, 0.41)
+                badge_col = (0.06, 0.72, 0.50)
+                badge_icon = "CHECK"
+
             # Proportional geometry calculations
             r_pt = min(max(ah * 0.075, 4.0), 10.0)
             r_pct = min(max(r_pt / min(aw, ah), 0.03), 0.15)
             hh = max(min(ah * 0.25, 26.0), 16.0)
-            header_r_pct = min(r_pt / hh, 0.49)
+            header_r_pct = min(r_pt / max(hh, 1.0), 0.45)
 
             # 1. 3D Card Soft Drop Shadows (multi-layered diffuse realistic depth)
             for off_x, off_y, alpha in [(4.0, 5.0, 0.04), (2.8, 3.8, 0.07), (1.8, 2.5, 0.11), (0.8, 1.2, 0.16)]:
@@ -1644,19 +1673,19 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             page.draw_rect(
                 fitz.Rect(ax, ay, ax + aw, ay + ah),
                 fill=(1, 1, 1),
-                color=(0.05, 0.44, 0.41) if appearance_opts.get('show_border', True) else None,
+                color=theme_hdr if appearance_opts.get('show_border', True) else None,
                 radius=r_pct,
                 width=1.6 if appearance_opts.get('show_border', True) else 0
             )
 
-            # 3. Teal Header Banner (top rounded corners, square bottom)
+            # 3. Header Banner (top rounded corners, square bottom)
             page.draw_rect(
                 fitz.Rect(ax, ay, ax + aw, ay + hh),
-                fill=(0.05, 0.44, 0.41), color=None, radius=header_r_pct
+                fill=theme_hdr, color=None, radius=header_r_pct
             )
             page.draw_rect(
                 fitz.Rect(ax, ay + hh - r_pt, ax + aw, ay + hh),
-                fill=(0.05, 0.44, 0.41), color=None
+                fill=theme_hdr, color=None
             )
 
             # 3D Highlight Sheen across top of header (subtle glass reflection)
@@ -1665,16 +1694,24 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
                 fill=(1, 1, 1), color=None, fill_opacity=0.14
             )
 
-            # 4. Verified Green Circular Badge + White Tick inside Header
+            # 4. Circular Badge + Icon (Check ✓, Question ?, or Cross ✗)
             badge_r = min(hh * 0.28, 6.5)
             badge_cx = ax + max(aw * 0.04, 8.0) + badge_r
             badge_cy = ay + hh * 0.5
-            page.draw_circle(fitz.Point(badge_cx, badge_cy), badge_r, fill=(0.06, 0.72, 0.50), color=None)
+            page.draw_circle(fitz.Point(badge_cx, badge_cy), badge_r, fill=badge_col, color=None)
 
-            p1 = fitz.Point(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
-            p2 = fitz.Point(badge_cx - badge_r * 0.10, badge_cy + badge_r * 0.40)
-            p3 = fitz.Point(badge_cx + badge_r * 0.50, badge_cy - badge_r * 0.42)
-            page.draw_polyline([p1, p2, p3], color=(1, 1, 1), width=max(1.4, badge_r * 0.26), lineJoin=1, lineCap=1)
+            if badge_icon == "CHECK":
+                p1 = fitz.Point(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
+                p2 = fitz.Point(badge_cx - badge_r * 0.10, badge_cy + badge_r * 0.40)
+                p3 = fitz.Point(badge_cx + badge_r * 0.50, badge_cy - badge_r * 0.42)
+                page.draw_polyline([p1, p2, p3], color=(1, 1, 1), width=max(1.4, badge_r * 0.26), lineJoin=1, lineCap=1)
+            elif badge_icon == "X":
+                d = badge_r * 0.44
+                page.draw_line(fitz.Point(badge_cx - d, badge_cy - d), fitz.Point(badge_cx + d, badge_cy + d), color=(1, 1, 1), width=max(1.4, badge_r * 0.26), lineCap=1)
+                page.draw_line(fitz.Point(badge_cx - d, badge_cy + d), fitz.Point(badge_cx + d, badge_cy - d), color=(1, 1, 1), width=max(1.4, badge_r * 0.26), lineCap=1)
+            elif badge_icon == "?":
+                q_sz = badge_r * 1.55
+                page.insert_text(fitz.Point(badge_cx - q_sz * 0.26, badge_cy + q_sz * 0.35), "?", fontsize=q_sz, fontname="hebo", color=(1, 1, 1))
 
             # Header Title Text (Bold White)
             header_f = max(min(hh * 0.44, 9.5), 5.5)
@@ -1689,22 +1726,30 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             body_top = ay + hh
             body_h = max(ah - hh, 10.0)
 
-            # Watermark 1: Large Translucent Checkmark on right side with ROUNDED CAPS
+            # Watermark 1: Checkmark, Question Mark, or Cross on right side
             if appearance_opts.get('show_tick', True):
                 tick_cx = ax + aw * 0.74
                 tick_cy = body_top + body_h * 0.48
                 ts = min(aw * 0.22, body_h * 0.44)
-                w_p1 = fitz.Point(tick_cx - ts, tick_cy)
-                w_p2 = fitz.Point(tick_cx - ts * 0.20, tick_cy + ts * 0.65)
-                w_p3 = fitz.Point(tick_cx + ts * 0.85, tick_cy - ts * 0.75)
-                page.draw_polyline(
-                    [w_p1, w_p2, w_p3],
-                    color=(0.05, 0.44, 0.41),
-                    width=max(5.5, ts * 0.24),
-                    stroke_opacity=0.18,
-                    lineJoin=1,
-                    lineCap=1
-                )
+                if badge_icon == "CHECK":
+                    w_p1 = fitz.Point(tick_cx - ts, tick_cy)
+                    w_p2 = fitz.Point(tick_cx - ts * 0.20, tick_cy + ts * 0.65)
+                    w_p3 = fitz.Point(tick_cx + ts * 0.85, tick_cy - ts * 0.75)
+                    page.draw_polyline(
+                        [w_p1, w_p2, w_p3],
+                        color=theme_hdr,
+                        width=max(5.5, ts * 0.24),
+                        stroke_opacity=0.18,
+                        lineJoin=1,
+                        lineCap=1
+                    )
+                elif badge_icon == "X":
+                    xd = ts * 0.75
+                    page.draw_line(fitz.Point(tick_cx - xd, tick_cy - xd), fitz.Point(tick_cx + xd, tick_cy + xd), color=theme_hdr, width=max(5.5, ts * 0.24), stroke_opacity=0.18, lineCap=1)
+                    page.draw_line(fitz.Point(tick_cx - xd, tick_cy + xd), fitz.Point(tick_cx + xd, tick_cy - xd), color=theme_hdr, width=max(5.5, ts * 0.24), stroke_opacity=0.18, lineCap=1)
+                elif badge_icon == "?":
+                    qf = max(ts * 1.8, 18.0)
+                    page.insert_text(fitz.Point(tick_cx - qf * 0.25, tick_cy + qf * 0.35), "?", fontsize=qf, fontname="hebo", color=theme_hdr, fill_opacity=0.18)
 
             # Watermark 2: Subtle 'DIGITALLY SIGNED' text in bottom-right corner
             wm_text = 'DIGITALLY SIGNED'
@@ -1715,7 +1760,7 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
                     fitz.Point(ax + aw - wm_w - 12, ay + ah - 6),
                     wm_text,
                     fontsize=wm_f, fontname='hebo',
-                    color=(0.05, 0.44, 0.41), fill_opacity=0.12
+                    color=theme_hdr, fill_opacity=0.12
                 )
 
             # 6. Left Custom Logo (if configured and exists)
@@ -1736,7 +1781,7 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
                 except Exception as e:
                     logger.warning(f"PyMuPDF custom logo overlay error: {e}")
 
-            # 7. Body Text Typography (Dynamic Scaling & Auto-Fitting)
+            # 7. Body Text Typography (Dynamic Scaling & Strict Anti-Overlap)
             left_pad = (logo_w + 14) if has_logo else 12
             right_pad = 8
             avail_w = max(aw - left_pad - right_pad, 20.0)
@@ -1744,15 +1789,16 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
 
             n = len(body_lines)
             spacing = body_avail_h / max(n, 1)
-            base_f = max(min(spacing * 0.72, 10.5), 4.5)
-            cur_y = body_top + 6 + base_f * 0.90
+            # Mathematically bounds font size below line spacing so lines NEVER collide vertically
+            base_f = min(max(spacing * 0.72, 2.5), 10.5)
+            cur_y = body_top + 4 + base_f * 0.88
 
             for idx, (txt, is_b, col) in enumerate(body_lines):
-                f_size = base_f * (1.14 if idx == 0 else (1.02 if is_b else 0.95))
+                f_size = min(base_f * (1.12 if idx == 0 else (1.02 if is_b else 0.95)), spacing * 0.88)
                 fn = 'hebo' if is_b else 'helv'
                 w_t = fitz.get_text_length(txt, fontname=fn, fontsize=f_size)
-                if w_t > (avail_w * 0.92) and f_size > 3.5:
-                    f_size = max(f_size * (avail_w * 0.92 / w_t), 3.5)
+                if w_t > (avail_w * 0.92) and f_size > 2.5:
+                    f_size = max(f_size * (avail_w * 0.92 / w_t), 2.5)
                     w_t = fitz.get_text_length(txt, fontname=fn, fontsize=f_size)
                 render_txt = txt
                 while len(render_txt) > 4 and fitz.get_text_length(render_txt, fontname=fn, fontsize=f_size) > avail_w:
@@ -1764,7 +1810,7 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             if appearance_opts.get('show_border', True):
                 page.draw_rect(
                     fitz.Rect(ax, ay, ax + aw, ay + ah),
-                    fill=None, color=(0.05, 0.44, 0.41), radius=r_pct, width=1.6
+                    fill=None, color=theme_hdr, radius=r_pct, width=1.6
                 )
 
         doc.save(tf_name, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
@@ -1821,6 +1867,21 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 r_pt = min(max(ah * 0.075, 4.0), 10.0)
                 hh = max(min(ah * 0.25, 26.0), 16.0)
 
+                # Validation status styling (Green Verified ✓, Yellow CRL ? , Red Invalid ✗)
+                v_status = str(appearance_opts.get('validation_status', 'verified')).lower()
+                if 'invalid' in v_status or 'red' in v_status:
+                    tr, tg, tb = 0.75, 0.12, 0.12
+                    br, bg, bb = 0.93, 0.20, 0.20
+                    badge_icon = "X"
+                elif 'unknown' in v_status or 'yellow' in v_status or 'crl' in v_status:
+                    tr, tg, tb = 0.78, 0.48, 0.05
+                    br, bg, bb = 0.96, 0.62, 0.07
+                    badge_icon = "?"
+                else:
+                    tr, tg, tb = 0.05, 0.44, 0.41
+                    br, bg, bb = 0.06, 0.72, 0.50
+                    badge_icon = "CHECK"
+
                 # 1. 3D Card Soft Drop Shadows (multi-layered diffuse realistic depth)
                 for off_x, off_y, alpha in [(4.0, 5.0, 0.04), (2.8, 3.8, 0.07), (1.8, 2.5, 0.11), (0.8, 1.2, 0.16)]:
                     c.setFillColor(Color(0.06, 0.09, 0.16, alpha=alpha))
@@ -1828,12 +1889,12 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
 
                 # 2. Card White Body Background
                 c.setFillColor(Color(1, 1, 1))
-                c.setStrokeColor(Color(0.05, 0.44, 0.41))
+                c.setStrokeColor(Color(tr, tg, tb))
                 c.setLineWidth(1.6)
                 c.roundRect(ax, ay, aw, ah, r_pt, fill=1, stroke=1 if appearance_opts.get('show_border', True) else 0)
 
-                # 3. Teal Header Banner (top rounded corners, square bottom)
-                c.setFillColor(Color(0.05, 0.44, 0.41))
+                # 3. Header Banner (top rounded corners, square bottom)
+                c.setFillColor(Color(tr, tg, tb))
                 c.roundRect(ax, ay + ah - hh, aw, hh, r_pt, fill=1, stroke=0)
                 c.rect(ax, ay + ah - hh, aw, r_pt, fill=1, stroke=0)
 
@@ -1841,22 +1902,33 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 c.setFillColor(Color(1, 1, 1, alpha=0.14))
                 c.rect(ax + r_pt * 0.5, ay + ah - hh * 0.38, aw - r_pt, hh * 0.38 - 1.2, fill=1, stroke=0)
 
-                # 4. Verified Green Circular Badge + White Tick inside Header
+                # 4. Circular Badge + Icon (Check ✓, Question ?, or Cross ✗)
                 badge_r = min(hh * 0.28, 6.5)
                 badge_cx = ax + max(aw * 0.04, 8.0) + badge_r
                 badge_cy = ay + ah - hh * 0.5
-                c.setFillColor(Color(0.06, 0.72, 0.50))
+                c.setFillColor(Color(br, bg, bb))
                 c.circle(badge_cx, badge_cy, badge_r, fill=1, stroke=0)
 
-                p = c.beginPath()
-                p.moveTo(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
-                p.lineTo(badge_cx - badge_r * 0.10, badge_cy - badge_r * 0.40)
-                p.lineTo(badge_cx + badge_r * 0.50, badge_cy + badge_r * 0.42)
                 c.setStrokeColor(Color(1, 1, 1))
+                c.setFillColor(Color(1, 1, 1))
                 c.setLineWidth(max(1.4, badge_r * 0.26))
                 c.setLineJoin(1)
                 c.setLineCap(1)
-                c.drawPath(p, 1, 0)
+
+                if badge_icon == "CHECK":
+                    p = c.beginPath()
+                    p.moveTo(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
+                    p.lineTo(badge_cx - badge_r * 0.10, badge_cy - badge_r * 0.40)
+                    p.lineTo(badge_cx + badge_r * 0.50, badge_cy + badge_r * 0.42)
+                    c.drawPath(p, 1, 0)
+                elif badge_icon == "X":
+                    d = badge_r * 0.44
+                    c.line(badge_cx - d, badge_cy - d, badge_cx + d, badge_cy + d)
+                    c.line(badge_cx - d, badge_cy + d, badge_cx + d, badge_cy - d)
+                elif badge_icon == "?":
+                    q_sz = max(badge_r * 1.55, 6.0)
+                    c.setFont('Helvetica-Bold', q_sz)
+                    c.drawString(badge_cx - q_sz * 0.26, badge_cy - q_sz * 0.34, "?")
 
                 # Header Title Text (Bold White)
                 header_f = max(min(hh * 0.44, 9.5), 5.5)
@@ -1867,26 +1939,36 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 # 5. Background Watermarks in Card Body
                 body_h = max(ah - hh, 10.0)
 
-                # Watermark 1: Large Translucent Checkmark on right side with ROUNDED CAPS
+                # Watermark 1: Checkmark, Cross, or Question Mark on right side
                 if appearance_opts.get('show_tick', True):
                     tick_cx = ax + aw * 0.74
                     tick_cy = ay + body_h * 0.48
                     ts = min(aw * 0.22, body_h * 0.44)
-                    c.setStrokeColor(Color(0.05, 0.44, 0.41, alpha=0.18))
+                    c.setStrokeColor(Color(tr, tg, tb, alpha=0.18))
                     c.setLineWidth(max(5.5, ts * 0.24))
                     c.setLineJoin(1)
                     c.setLineCap(1)
-                    w_p = c.beginPath()
-                    w_p.moveTo(tick_cx - ts, tick_cy)
-                    w_p.lineTo(tick_cx - ts * 0.20, tick_cy - ts * 0.65)
-                    w_p.lineTo(tick_cx + ts * 0.85, tick_cy + ts * 0.75)
-                    c.drawPath(w_p, 1, 0)
+                    if badge_icon == "CHECK":
+                        w_p = c.beginPath()
+                        w_p.moveTo(tick_cx - ts, tick_cy)
+                        w_p.lineTo(tick_cx - ts * 0.20, tick_cy - ts * 0.65)
+                        w_p.lineTo(tick_cx + ts * 0.85, tick_cy + ts * 0.75)
+                        c.drawPath(w_p, 1, 0)
+                    elif badge_icon == "X":
+                        xd = ts * 0.75
+                        c.line(tick_cx - xd, tick_cy - xd, tick_cx + xd, tick_cy + xd)
+                        c.line(tick_cx - xd, tick_cy + xd, tick_cx + xd, tick_cy - xd)
+                    elif badge_icon == "?":
+                        qf = max(ts * 1.8, 18.0)
+                        c.setFont('Helvetica-Bold', qf)
+                        c.setFillColor(Color(tr, tg, tb, alpha=0.18))
+                        c.drawString(tick_cx - qf * 0.25, tick_cy - qf * 0.34, "?")
 
                 # Watermark 2: Subtle 'DIGITALLY SIGNED' text in bottom-right corner
                 wm_text = 'DIGITALLY SIGNED'
                 wm_f = max(min(body_h * 0.19, aw * 0.07, 13.0), 5.5)
                 c.setFont('Helvetica-Bold', wm_f)
-                c.setFillColor(Color(0.05, 0.44, 0.41, alpha=0.12))
+                c.setFillColor(Color(tr, tg, tb, alpha=0.12))
                 wm_w = c.stringWidth(wm_text, 'Helvetica-Bold', wm_f)
                 if wm_w < aw * 0.68:
                     c.drawString(ax + aw - wm_w - 12, ay + 6, wm_text)
@@ -1906,7 +1988,7 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                     except Exception as e:
                         logger.warning(f"ReportLab custom logo overlay error: {e}")
 
-                # 7. Body Text Typography (Dynamic Scaling & Auto-Fitting)
+                # 7. Body Text Typography (Dynamic Scaling & Strict Anti-Overlap)
                 left_pad = (logo_w + 14) if has_logo else 12
                 right_pad = 8
                 avail_w = max(aw - left_pad - right_pad, 20.0)
@@ -1914,15 +1996,15 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
 
                 n = len(body_lines)
                 spacing = body_avail_h / max(n, 1)
-                base_f = max(min(spacing * 0.72, 10.5), 4.5)
-                cur_y = ay + body_h - 6 - base_f * 0.88
+                base_f = min(max(spacing * 0.72, 2.5), 10.5)
+                cur_y = ay + body_h - 4 - base_f * 0.88
 
                 for idx, (txt, is_b, (r, g, b)) in enumerate(body_lines):
-                    f_size = base_f * (1.14 if idx == 0 else (1.02 if is_b else 0.95))
+                    f_size = min(base_f * (1.12 if idx == 0 else (1.02 if is_b else 0.95)), spacing * 0.88)
                     fn = 'Helvetica-Bold' if is_b else 'Helvetica'
                     w_t = c.stringWidth(txt, fn, f_size)
-                    if w_t > (avail_w * 0.92) and f_size > 3.5:
-                        f_size = max(f_size * (avail_w * 0.92 / w_t), 3.5)
+                    if w_t > (avail_w * 0.92) and f_size > 2.5:
+                        f_size = max(f_size * (avail_w * 0.92 / w_t), 2.5)
                         w_t = c.stringWidth(txt, fn, f_size)
                     render_txt = txt
                     while len(render_txt) > 4 and c.stringWidth(render_txt, fn, f_size) > avail_w:
@@ -1934,7 +2016,7 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
 
                 # 8. Crisp Outer Border Stroke
                 if appearance_opts.get('show_border', True):
-                    c.setStrokeColor(Color(0.05, 0.44, 0.41))
+                    c.setStrokeColor(Color(tr, tg, tb))
                     c.setLineWidth(1.6)
                     c.roundRect(ax, ay, aw, ah, r_pt, fill=0, stroke=1)
 
@@ -3423,6 +3505,19 @@ class SignatureSettingsDialog:
         grid4.columnconfigure(0, weight=1)
         grid4.columnconfigure(1, weight=1)
 
+        # 5. Adobe Acrobat Validation Status Card
+        c5 = tk.Frame(scroll_frame, bg="#FFFFFF", relief=tk.RAISED, bd=1, padx=12, pady=10)
+        c5.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(c5, text="5. Adobe Acrobat Validation Status & Visual Style", font=get_sys_font(10, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(c5, text="Choose how the digital signature card visual status badge is rendered:", font=get_sys_font(8), fg="#64748B", bg="#FFFFFF").pack(anchor=tk.W, pady=(0, 6))
+
+        for s_val, s_lbl in [
+            ("✓ Verified (Green)", "✓ Verified (Green Theme & Tick Badge) - Valid signature & trusted certificate"),
+            ("? CRL Unknown (Yellow)", "? CRL Unknown / Offline (Yellow Theme & Question Badge) - Unchecked CRL or self-signed"),
+            ("✗ Invalid (Red)", "✗ Invalid / Altered (Red Theme & Cross Badge) - Tampered or invalid document")
+        ]:
+            tk.Radiobutton(c5, text=s_lbl, variable=app.sign_status_appearance_var, value=s_val, font=get_sys_font(8, "bold"), fg="#1E293B", bg="#FFFFFF").pack(anchor=tk.W, pady=2)
+
         # Bottom Close Button
         btn_bot = tk.Frame(outer, bg="#F1F5F9")
         btn_bot.pack(fill=tk.X, pady=(4, 0))
@@ -4094,6 +4189,7 @@ class VisualPdfSignerApp:
         self.show_issuer_var = tk.BooleanVar(value=False)
         self.show_tick_var = tk.BooleanVar(value=True)
         self.show_border_var = tk.BooleanVar(value=True)
+        self.sign_status_appearance_var = tk.StringVar(value="✓ Verified (Green)")
 
         # Custom Logo & Password Protection settings
         self.sign_custom_logo_path = tk.StringVar(value="")
@@ -4616,6 +4712,21 @@ class VisualPdfSignerApp:
                 padx=2, pady=0,
                 command=lambda: save_signature_settings(self)
             ).pack(side=tk.LEFT, padx=1)
+
+        # Adobe Acrobat Validation Status Appearance Row
+        st_row = tk.Frame(opts_card, bg="#F8FAFC")
+        st_row.pack(fill=tk.X, pady=(3, 0))
+        tk.Label(st_row, text="Acrobat Look:", font=get_sys_font(7, "bold"), fg="#1E3A8A", bg="#F8FAFC").pack(side=tk.LEFT)
+        self.combo_status_appearance = ttk.Combobox(
+            st_row,
+            textvariable=self.sign_status_appearance_var,
+            values=["✓ Verified (Green)", "? CRL Unknown (Yellow)", "✗ Invalid (Red)"],
+            state="readonly",
+            font=get_sys_font(7, "bold"),
+            width=22
+        )
+        self.combo_status_appearance.pack(side=tk.LEFT, padx=(4, 0))
+        self.combo_status_appearance.bind("<<ComboboxSelected>>", lambda e: save_signature_settings(self))
 
         # Selected Signature Areas Listbox / Container
         tk.Label(left_panel, text="Selected Signature Area(s):", font=get_sys_font(8, "bold"), fg="#1E40AF", bg="#FFFFFF").pack(side=tk.TOP, anchor=tk.W, pady=(2, 1))
@@ -5335,10 +5446,10 @@ class VisualPdfSignerApp:
         # Options Card
         opts_f = tk.Frame(left, bg="#FFFFFF")
         opts_f.pack(fill=tk.X, pady=(0, 10))
-        self.keep_visual_stamp_var = tk.BooleanVar(value=True)
+        self.keep_visual_stamp_var = tk.BooleanVar(value=False)
         chk_keep = tk.Checkbutton(
             opts_f,
-            text="Keep visual signature stamp as plain graphic",
+            text="Keep visual signature stamp on PDF as plain graphic (Leave unchecked to erase completely)",
             variable=self.keep_visual_stamp_var,
             font=get_sys_font(8, "bold"),
             fg="#047857", bg="#FFFFFF"
@@ -5703,6 +5814,7 @@ class VisualPdfSignerApp:
                 'show_issuer': self.show_issuer_var.get(),
                 'show_tick': self.show_tick_var.get(),
                 'show_border': self.show_border_var.get(),
+                'validation_status': self.sign_status_appearance_var.get(),
             }
 
             if is_token:
@@ -5859,6 +5971,7 @@ class VisualPdfSignerApp:
                     'show_issuer': self.show_issuer_var.get(),
                     'show_tick': self.show_tick_var.get(),
                     'show_border': self.show_border_var.get(),
+                    'validation_status': self.sign_status_appearance_var.get(),
                 }
 
                 def process_batch(signer, cert_parsed):
