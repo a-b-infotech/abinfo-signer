@@ -1551,7 +1551,7 @@ def build_signature_stamp_lines(cert, reason="", location="", contact="", appear
     body_lines = []
     # 1. Signer Name (Prominent bold text in deep dark slate / navy)
     if appearance_opts.get('show_name', True):
-        body_lines.append((signer_cn, True, (0.06, 0.09, 0.16)))
+        body_lines.append((signer_cn, True, (0.04, 0.08, 0.16)))
 
     # 2. Organization Name
     if appearance_opts.get('show_org', True) and org_name:
@@ -1566,10 +1566,10 @@ def build_signature_stamp_lines(cert, reason="", location="", contact="", appear
     if unit_name and appearance_opts.get('show_reason', True) and reason:
         body_lines.append((f"Reason: {reason}", False, (0.20, 0.25, 0.33)))
 
-    # 4. Date (Royal navy blue, bold)
+    # 4. Date (Royal cobalt blue #1D4ED8, bold highlighted)
     if appearance_opts.get('show_date', True):
         d_str = datetime.now(ist).strftime('%Y.%m.%d %H:%M:%S IST')
-        body_lines.append((f"Date: {d_str}", True, (0.12, 0.25, 0.69)))
+        body_lines.append((f"Date: {d_str}", True, (0.11, 0.30, 0.85)))
 
     # 5. Location / Address
     if appearance_opts.get('show_address', True):
@@ -1633,48 +1633,54 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             hh = max(min(ah * 0.25, 26.0), 16.0)
             header_r_pct = min(r_pt / hh, 0.49)
 
-            # 1. 3D Card Soft Drop Shadows (multi-layered for realistic depth)
-            for off, alpha in [(2.4, 0.06), (1.4, 0.10), (0.7, 0.14)]:
+            # 1. 3D Card Soft Drop Shadows (multi-layered diffuse realistic depth)
+            for off_x, off_y, alpha in [(4.0, 5.0, 0.04), (2.8, 3.8, 0.07), (1.8, 2.5, 0.11), (0.8, 1.2, 0.16)]:
                 page.draw_rect(
-                    fitz.Rect(ax + off * 0.5, ay + off, ax + aw + off * 0.5, ay + ah + off),
-                    fill=(0.10, 0.12, 0.16), color=None, radius=r_pct, fill_opacity=alpha
+                    fitz.Rect(ax + off_x, ay + off_y, ax + aw + off_x, ay + ah + off_y),
+                    fill=(0.06, 0.09, 0.16), color=None, radius=r_pct, fill_opacity=alpha
                 )
 
             # 2. Card White Body Background
             page.draw_rect(
                 fitz.Rect(ax, ay, ax + aw, ay + ah),
                 fill=(1, 1, 1),
-                color=(0.05, 0.46, 0.43) if appearance_opts.get('show_border', True) else None,
+                color=(0.05, 0.44, 0.41) if appearance_opts.get('show_border', True) else None,
                 radius=r_pct,
-                width=1.4 if appearance_opts.get('show_border', True) else 0
+                width=1.6 if appearance_opts.get('show_border', True) else 0
             )
 
             # 3. Teal Header Banner (top rounded corners, square bottom)
             page.draw_rect(
                 fitz.Rect(ax, ay, ax + aw, ay + hh),
-                fill=(0.05, 0.46, 0.43), color=None, radius=header_r_pct
+                fill=(0.05, 0.44, 0.41), color=None, radius=header_r_pct
             )
             page.draw_rect(
                 fitz.Rect(ax, ay + hh - r_pt, ax + aw, ay + hh),
-                fill=(0.05, 0.46, 0.43), color=None
+                fill=(0.05, 0.44, 0.41), color=None
+            )
+
+            # 3D Highlight Sheen across top of header (subtle glass reflection)
+            page.draw_rect(
+                fitz.Rect(ax + r_pt * 0.5, ay + 1.2, ax + aw - r_pt * 0.5, ay + hh * 0.38),
+                fill=(1, 1, 1), color=None, fill_opacity=0.14
             )
 
             # 4. Verified Green Circular Badge + White Tick inside Header
-            badge_r = min(hh * 0.32, 6.5)
+            badge_r = min(hh * 0.28, 6.5)
             badge_cx = ax + max(aw * 0.04, 8.0) + badge_r
             badge_cy = ay + hh * 0.5
             page.draw_circle(fitz.Point(badge_cx, badge_cy), badge_r, fill=(0.06, 0.72, 0.50), color=None)
 
             p1 = fitz.Point(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
-            p2 = fitz.Point(badge_cx - badge_r * 0.10, badge_cy + badge_r * 0.38)
+            p2 = fitz.Point(badge_cx - badge_r * 0.10, badge_cy + badge_r * 0.40)
             p3 = fitz.Point(badge_cx + badge_r * 0.50, badge_cy - badge_r * 0.42)
-            page.draw_polyline([p1, p2, p3], color=(1, 1, 1), width=max(1.2, badge_r * 0.22), lineJoin=1)
+            page.draw_polyline([p1, p2, p3], color=(1, 1, 1), width=max(1.4, badge_r * 0.26), lineJoin=1, lineCap=1)
 
             # Header Title Text (Bold White)
-            header_f = max(min(hh * 0.46, 9.5), 5.5)
+            header_f = max(min(hh * 0.44, 9.5), 5.5)
             text_y = ay + hh * 0.5 + header_f * 0.35
             page.insert_text(
-                fitz.Point(badge_cx + badge_r + 6, text_y),
+                fitz.Point(badge_cx + badge_r + 8, text_y),
                 header_title,
                 fontsize=header_f, fontname='hebo', color=(1, 1, 1)
             )
@@ -1683,32 +1689,33 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             body_top = ay + hh
             body_h = max(ah - hh, 10.0)
 
-            # Watermark 1: Large Translucent Checkmark on right side
+            # Watermark 1: Large Translucent Checkmark on right side with ROUNDED CAPS
             if appearance_opts.get('show_tick', True):
-                tick_cx = ax + aw * 0.76
-                tick_cy = body_top + body_h * 0.52
-                ts = min(aw * 0.20, body_h * 0.42)
+                tick_cx = ax + aw * 0.74
+                tick_cy = body_top + body_h * 0.48
+                ts = min(aw * 0.22, body_h * 0.44)
                 w_p1 = fitz.Point(tick_cx - ts, tick_cy)
                 w_p2 = fitz.Point(tick_cx - ts * 0.20, tick_cy + ts * 0.65)
-                w_p3 = fitz.Point(tick_cx + ts * 0.82, tick_cy - ts * 0.75)
+                w_p3 = fitz.Point(tick_cx + ts * 0.85, tick_cy - ts * 0.75)
                 page.draw_polyline(
                     [w_p1, w_p2, w_p3],
-                    color=(0.05, 0.46, 0.43),
-                    width=max(2.8, ts * 0.18),
-                    stroke_opacity=0.16,
-                    lineJoin=1
+                    color=(0.05, 0.44, 0.41),
+                    width=max(5.5, ts * 0.24),
+                    stroke_opacity=0.18,
+                    lineJoin=1,
+                    lineCap=1
                 )
 
             # Watermark 2: Subtle 'DIGITALLY SIGNED' text in bottom-right corner
             wm_text = 'DIGITALLY SIGNED'
-            wm_f = max(min(body_h * 0.22, aw * 0.07, 12.0), 5.0)
+            wm_f = max(min(body_h * 0.19, aw * 0.07, 13.0), 5.5)
             wm_w = fitz.get_text_length(wm_text, fontname='hebo', fontsize=wm_f)
-            if wm_w < aw * 0.65:
+            if wm_w < aw * 0.68:
                 page.insert_text(
-                    fitz.Point(ax + aw - wm_w - 10, ay + ah - 6),
+                    fitz.Point(ax + aw - wm_w - 12, ay + ah - 6),
                     wm_text,
                     fontsize=wm_f, fontname='hebo',
-                    color=(0.05, 0.46, 0.43), fill_opacity=0.10
+                    color=(0.05, 0.44, 0.41), fill_opacity=0.12
                 )
 
             # 6. Left Custom Logo (if configured and exists)
@@ -1757,7 +1764,7 @@ def draw_incremental_overlay_layer(pdf_bytes, areas, cert, reason="", location="
             if appearance_opts.get('show_border', True):
                 page.draw_rect(
                     fitz.Rect(ax, ay, ax + aw, ay + ah),
-                    fill=None, color=(0.05, 0.46, 0.43), radius=r_pct, width=1.4
+                    fill=None, color=(0.05, 0.44, 0.41), radius=r_pct, width=1.6
                 )
 
         doc.save(tf_name, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
@@ -1814,24 +1821,28 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
                 r_pt = min(max(ah * 0.075, 4.0), 10.0)
                 hh = max(min(ah * 0.25, 26.0), 16.0)
 
-                # 1. 3D Card Soft Drop Shadows (multi-layered for realistic depth)
-                for off, alpha in [(2.4, 0.06), (1.4, 0.10), (0.7, 0.14)]:
-                    c.setFillColor(Color(0.10, 0.12, 0.16, alpha=alpha))
-                    c.roundRect(ax + off * 0.5, ay - off, aw, ah, r_pt, fill=1, stroke=0)
+                # 1. 3D Card Soft Drop Shadows (multi-layered diffuse realistic depth)
+                for off_x, off_y, alpha in [(4.0, 5.0, 0.04), (2.8, 3.8, 0.07), (1.8, 2.5, 0.11), (0.8, 1.2, 0.16)]:
+                    c.setFillColor(Color(0.06, 0.09, 0.16, alpha=alpha))
+                    c.roundRect(ax + off_x, ay - off_y, aw, ah, r_pt, fill=1, stroke=0)
 
                 # 2. Card White Body Background
                 c.setFillColor(Color(1, 1, 1))
-                c.setStrokeColor(Color(0.05, 0.46, 0.43))
-                c.setLineWidth(1.4)
+                c.setStrokeColor(Color(0.05, 0.44, 0.41))
+                c.setLineWidth(1.6)
                 c.roundRect(ax, ay, aw, ah, r_pt, fill=1, stroke=1 if appearance_opts.get('show_border', True) else 0)
 
                 # 3. Teal Header Banner (top rounded corners, square bottom)
-                c.setFillColor(Color(0.05, 0.46, 0.43))
+                c.setFillColor(Color(0.05, 0.44, 0.41))
                 c.roundRect(ax, ay + ah - hh, aw, hh, r_pt, fill=1, stroke=0)
                 c.rect(ax, ay + ah - hh, aw, r_pt, fill=1, stroke=0)
 
+                # 3D Highlight Sheen across top of header (subtle glass reflection)
+                c.setFillColor(Color(1, 1, 1, alpha=0.14))
+                c.rect(ax + r_pt * 0.5, ay + ah - hh * 0.38, aw - r_pt, hh * 0.38 - 1.2, fill=1, stroke=0)
+
                 # 4. Verified Green Circular Badge + White Tick inside Header
-                badge_r = min(hh * 0.32, 6.5)
+                badge_r = min(hh * 0.28, 6.5)
                 badge_cx = ax + max(aw * 0.04, 8.0) + badge_r
                 badge_cy = ay + ah - hh * 0.5
                 c.setFillColor(Color(0.06, 0.72, 0.50))
@@ -1839,44 +1850,46 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
 
                 p = c.beginPath()
                 p.moveTo(badge_cx - badge_r * 0.46, badge_cy - badge_r * 0.02)
-                p.lineTo(badge_cx - badge_r * 0.10, badge_cy - badge_r * 0.38)
+                p.lineTo(badge_cx - badge_r * 0.10, badge_cy - badge_r * 0.40)
                 p.lineTo(badge_cx + badge_r * 0.50, badge_cy + badge_r * 0.42)
                 c.setStrokeColor(Color(1, 1, 1))
-                c.setLineWidth(max(1.2, badge_r * 0.22))
+                c.setLineWidth(max(1.4, badge_r * 0.26))
                 c.setLineJoin(1)
+                c.setLineCap(1)
                 c.drawPath(p, 1, 0)
 
                 # Header Title Text (Bold White)
-                header_f = max(min(hh * 0.46, 9.5), 5.5)
+                header_f = max(min(hh * 0.44, 9.5), 5.5)
                 c.setFont('Helvetica-Bold', header_f)
                 c.setFillColor(Color(1, 1, 1))
-                c.drawString(badge_cx + badge_r + 6, ay + ah - hh * 0.5 - header_f * 0.32, header_title)
+                c.drawString(badge_cx + badge_r + 8, ay + ah - hh * 0.5 - header_f * 0.32, header_title)
 
                 # 5. Background Watermarks in Card Body
                 body_h = max(ah - hh, 10.0)
 
-                # Watermark 1: Large Translucent Checkmark on right side
+                # Watermark 1: Large Translucent Checkmark on right side with ROUNDED CAPS
                 if appearance_opts.get('show_tick', True):
-                    tick_cx = ax + aw * 0.76
-                    tick_cy = ay + body_h * 0.52
-                    ts = min(aw * 0.20, body_h * 0.42)
-                    c.setStrokeColor(Color(0.05, 0.46, 0.43, alpha=0.16))
-                    c.setLineWidth(max(2.8, ts * 0.18))
+                    tick_cx = ax + aw * 0.74
+                    tick_cy = ay + body_h * 0.48
+                    ts = min(aw * 0.22, body_h * 0.44)
+                    c.setStrokeColor(Color(0.05, 0.44, 0.41, alpha=0.18))
+                    c.setLineWidth(max(5.5, ts * 0.24))
                     c.setLineJoin(1)
+                    c.setLineCap(1)
                     w_p = c.beginPath()
                     w_p.moveTo(tick_cx - ts, tick_cy)
                     w_p.lineTo(tick_cx - ts * 0.20, tick_cy - ts * 0.65)
-                    w_p.lineTo(tick_cx + ts * 0.82, tick_cy + ts * 0.75)
+                    w_p.lineTo(tick_cx + ts * 0.85, tick_cy + ts * 0.75)
                     c.drawPath(w_p, 1, 0)
 
                 # Watermark 2: Subtle 'DIGITALLY SIGNED' text in bottom-right corner
                 wm_text = 'DIGITALLY SIGNED'
-                wm_f = max(min(body_h * 0.22, aw * 0.07, 12.0), 5.0)
+                wm_f = max(min(body_h * 0.19, aw * 0.07, 13.0), 5.5)
                 c.setFont('Helvetica-Bold', wm_f)
-                c.setFillColor(Color(0.05, 0.46, 0.43, alpha=0.10))
+                c.setFillColor(Color(0.05, 0.44, 0.41, alpha=0.12))
                 wm_w = c.stringWidth(wm_text, 'Helvetica-Bold', wm_f)
-                if wm_w < aw * 0.65:
-                    c.drawString(ax + aw - wm_w - 10, ay + 6, wm_text)
+                if wm_w < aw * 0.68:
+                    c.drawString(ax + aw - wm_w - 12, ay + 6, wm_text)
 
                 # 6. Left Custom Logo (if configured and exists)
                 has_logo = False
@@ -1921,8 +1934,8 @@ def draw_reportlab_layer(pdf_bytes, areas, cert, reason="", location="", contact
 
                 # 8. Crisp Outer Border Stroke
                 if appearance_opts.get('show_border', True):
-                    c.setStrokeColor(Color(0.05, 0.46, 0.43))
-                    c.setLineWidth(1.4)
+                    c.setStrokeColor(Color(0.05, 0.44, 0.41))
+                    c.setLineWidth(1.6)
                     c.roundRect(ax, ay, aw, ah, r_pt, fill=0, stroke=1)
 
             c.save()
